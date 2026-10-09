@@ -1,0 +1,108 @@
+# The always_sunny example end to end: Middleman, the sidecar deciding for it,
+# and a local sign-in. See README.md.
+#
+# Middleman is built from a checkout that has the passthrough hook, found at
+# HAWK_DIR (default: a `hawk` directory beside this repository).
+services:
+  # Signs a token for you on each start and serves the public key Middleman
+  # checks it against. It runs in Middleman's image for its signing library.
+  signin:
+    image: always-sunny-middleman
+    pull_policy: never
+    depends_on:
+      middleman-image:
+        condition: service_completed_successfully
+    user: "0"
+    entrypoint: ["python", "/signin/signin.py"]
+    working_dir: /stack
+    volumes:
+      - ./signin.py:/signin/signin.py:ro
+      - ./.stack:/stack
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18500/jwks.json')"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  # Builds Middleman's image once, for the two services that run in it.
+  middleman-image:
+    image: always-sunny-middleman
+    build:
+      context: ${HAWK_DIR:-../../../hawk}/middleman
+      target: prod
+      additional_contexts:
+        hawk: ${HAWK_DIR:-../../../hawk}/hawk
+    entrypoint: ["true"]
+
+  middleman:
+    image: always-sunny-middleman
+    pull_policy: never
+    depends_on:
+      signin:
+        condition: service_healthy
+      sidecar:
+        condition: service_healthy
+    environment:
+      MIDDLEMAN_ENV: dev
+      MIDDLEMAN_CONFIG_FILE: /config/middleman.yaml
+      MODELS_JSON_PATH: /config/models.jsonc
+      # Middleman's passthrough hook: a class it loads at startup and calls
+      # with each request and reply. MiddlemanHook is this repository's, in a
+      # small package of its own, and sends each one to the sidecar. A
+      # Middleman image would have it from `pip install
+      # inspect_sentinel_middleman`. This stack mounts the package instead,
+      # so a change to it needs no rebuild.
+      MIDDLEMAN_PASSTHROUGH_HOOK: inspect_sentinel_middleman:MiddlemanHook
+      PYTHONPATH: /sentinel
+      INSPECT_SENTINEL_SIDECAR_URL: http://sidecar:8900/
+      # MiddlemanHook always sends the sidecar the request headers that start
+      # x-inspect-, x-hawk-, x-metr- or x-scout-. That covers
+      # x-inspect-sample-uuid, the header this example names a run with. Any
+      # other header reaches the sidecar only if it is listed here.
+      # x-sentinel-request is a header of this example's own: its Inspect hook
+      # puts an id for each model call in it, and asks the sidecar about the
+      # call by that id.
+      INSPECT_SENTINEL_SIDECAR_HEADERS: x-sentinel-request
+      DD_TRACE_ENABLED: "false"
+      # the provider keys stay here; neither the sidecar nor your eval is
+      # given them
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    volumes:
+      - ./middleman:/config:ro
+      - ../../src/proxies/middleman/inspect_sentinel_middleman:/sentinel/inspect_sentinel_middleman:ro
+    ports:
+      - 127.0.0.1:3500:3500
+
+  sidecar:
+    build:
+      context: ../..
+      dockerfile: examples/always_sunny/Dockerfile.sidecar
+    command:
+      - --load
+      - /sentinel/sentinels.py
+      - --sentinel
+      - /sentinel/sentinel.yaml
+      - --reject-status
+      - "503"
+      # the header a request is known by. The default is inspect_ai's x-irid,
+      # which an Inspect hook isn't told
+      - --request-id-header
+      - x-sentinel-request
+    environment:
+      # the endpoint for evals is served only when this is set, and asks for
+      # it as a bearer token. The `stations` task needs it; `philadelphia`
+      # runs the same without.
+      INSPECT_SENTINEL_EVAL_TOKEN: ${INSPECT_SENTINEL_EVAL_TOKEN:-}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8900/health')"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    volumes:
+      - ./sentinels.py:/sentinel/sentinels.py:ro
+      - ./sentinel.yaml:/sentinel/sentinel.yaml:ro
+    ports:
+      # the endpoint for evals. The port Middleman sends requests and replies
+      # to, 8900, stays inside the stack.
+      - 127.0.0.1:8901:8901

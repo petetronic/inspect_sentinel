@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
@@ -48,8 +49,25 @@ class EvalContext:
 
 
 @dataclass(frozen=True, kw_only=True)
+class ProxyContext:
+    """The model request a monitor or protocol is running on, as a proxy described it. None of it is verified: the caller set the headers, so where an agent makes its own model calls they came from the agent."""
+
+    provider: str
+    """Whose API the request is written for, e.g. `anthropic`."""
+
+    model: str
+    """The model the request is for, as the proxy names it."""
+
+    user: str | None
+    """Who the proxy says is calling, if it knows."""
+
+    headers: Mapping[str, str]
+    """The request headers the proxy passed on, by lowercase name. Which ones is for whoever runs the proxy to choose."""
+
+
+@dataclass(frozen=True, kw_only=True)
 class Context:
-    """What a monitor or protocol is given. Constant for a sample; nothing in it came from the agent."""
+    """What a monitor or protocol is given. Constant for a sample. Nothing in `eval` came from the agent; `proxy` says what it can't promise."""
 
     path: str
     """Instance path, e.g. `attempt/internet_attempt`. Empty at the top layer."""
@@ -59,6 +77,9 @@ class Context:
 
     eval: EvalContext | None
     """The task and sample being run, in an Inspect eval. None outside an eval, for example when a proxy runs the sentinel on requests that have no task, sample or epoch."""
+
+    proxy: ProxyContext | None = None
+    """The request being judged, behind a proxy. None in an eval's own process."""
 
     def store_as(self, model_cls: type[SMT]) -> SMT:
         """Typed view of this instance's state, namespaced by `path`.

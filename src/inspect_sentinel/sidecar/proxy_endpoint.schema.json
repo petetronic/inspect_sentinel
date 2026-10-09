@@ -1,0 +1,270 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "PassAnswer": {
+      "description": "Send the request or the reply on as it is.",
+      "properties": {
+        "action": {
+          "const": "pass",
+          "default": "pass",
+          "title": "Action",
+          "type": "string"
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Response headers to add when this answers a reply, each named `x-...`.",
+          "title": "Headers",
+          "type": "object"
+        }
+      },
+      "title": "PassAnswer",
+      "type": "object"
+    },
+    "RefuseAnswer": {
+      "description": "Send nothing on, and answer the caller with an error.",
+      "properties": {
+        "action": {
+          "const": "refuse",
+          "default": "refuse",
+          "title": "Action",
+          "type": "string"
+        },
+        "status": {
+          "description": "The HTTP status of the error.",
+          "maximum": 599,
+          "minimum": 400,
+          "title": "Status",
+          "type": "integer"
+        },
+        "message": {
+          "description": "What the caller is told.",
+          "title": "Message",
+          "type": "string"
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Response headers to add to the error, each named `x-...`.",
+          "title": "Headers",
+          "type": "object"
+        }
+      },
+      "required": [
+        "status",
+        "message"
+      ],
+      "title": "RefuseAnswer",
+      "type": "object"
+    },
+    "ReplaceAnswer": {
+      "description": "Send this body on in place of the one that was sent.",
+      "properties": {
+        "action": {
+          "const": "replace",
+          "default": "replace",
+          "title": "Action",
+          "type": "string"
+        },
+        "body": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "description": "A JSON object for a request, and base64 for a reply.",
+          "title": "Body"
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Response headers to add when this answers a reply, each named `x-...`.",
+          "title": "Headers",
+          "type": "object"
+        }
+      },
+      "required": [
+        "body"
+      ],
+      "title": "ReplaceAnswer",
+      "type": "object"
+    },
+    "ReplyMessage": {
+      "description": "A provider's reply, held whole before the caller is sent any of it. It is answered with a `PassAnswer`, a `ReplaceAnswer` or a `RefuseAnswer`.",
+      "properties": {
+        "version": {
+          "const": 1,
+          "description": "The version of these messages. A message in another version is not read.",
+          "title": "Version",
+          "type": "integer"
+        },
+        "phase": {
+          "const": "reply",
+          "title": "Phase",
+          "type": "string"
+        },
+        "id": {
+          "description": "The `id` of the request this is the reply to.",
+          "title": "Id",
+          "type": "string"
+        },
+        "provider": {
+          "title": "Provider",
+          "type": "string"
+        },
+        "model": {
+          "title": "Model",
+          "type": "string"
+        },
+        "user": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "User"
+        },
+        "status": {
+          "description": "The HTTP status of the provider's reply.",
+          "title": "Status",
+          "type": "integer"
+        },
+        "content_type": {
+          "description": "The reply's content type, which says whether it is one JSON object or a stream of events.",
+          "title": "Content Type",
+          "type": "string"
+        },
+        "body": {
+          "description": "The reply's body, as base64.",
+          "title": "Body",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "phase",
+        "id",
+        "provider",
+        "model",
+        "status",
+        "content_type",
+        "body"
+      ],
+      "title": "ReplyMessage",
+      "type": "object"
+    },
+    "RequestMessage": {
+      "description": "A model request, sent before it goes to the provider. It is answered with a `PassAnswer`, a `ReplaceAnswer` or a `RefuseAnswer`.",
+      "properties": {
+        "version": {
+          "const": 1,
+          "description": "The version of these messages. A message in another version is not read.",
+          "title": "Version",
+          "type": "integer"
+        },
+        "phase": {
+          "const": "request",
+          "title": "Phase",
+          "type": "string"
+        },
+        "id": {
+          "description": "Shared by a request and its reply.",
+          "title": "Id",
+          "type": "string"
+        },
+        "provider": {
+          "description": "The provider whose format the body is in, such as `anthropic` or `openai`.",
+          "title": "Provider",
+          "type": "string"
+        },
+        "model": {
+          "description": "The model, by the name the proxy shows for it.",
+          "title": "Model",
+          "type": "string"
+        },
+        "user": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Who the proxy signed the caller in as.",
+          "title": "User"
+        },
+        "run": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The run the request belongs to, where the proxy can tell. A sentinel's state is kept by run.",
+          "title": "Run"
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "The caller's request headers the proxy passes on, without credentials. They are the caller's claims.",
+          "title": "Headers",
+          "type": "object"
+        },
+        "body": {
+          "additionalProperties": true,
+          "description": "The request's JSON body.",
+          "title": "Body",
+          "type": "object"
+        }
+      },
+      "required": [
+        "version",
+        "phase",
+        "id",
+        "provider",
+        "model",
+        "body"
+      ],
+      "title": "RequestMessage",
+      "type": "object"
+    }
+  },
+  "title": "Inspect Sentinel: the endpoint for proxies",
+  "description": "JSON messages, POSTed to `/`. `messages` names the definition a message of each phase fits, and `answers` the definitions an answer fits.",
+  "messages": {
+    "request": {
+      "$ref": "#/$defs/RequestMessage"
+    },
+    "reply": {
+      "$ref": "#/$defs/ReplyMessage"
+    }
+  },
+  "answers": {
+    "pass": {
+      "$ref": "#/$defs/PassAnswer"
+    },
+    "replace": {
+      "$ref": "#/$defs/ReplaceAnswer"
+    },
+    "refuse": {
+      "$ref": "#/$defs/RefuseAnswer"
+    }
+  }
+}

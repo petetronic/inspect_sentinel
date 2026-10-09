@@ -1,0 +1,131 @@
+{
+  "id": "resp_0b9e48ed585cf091016ac45d130b0487d29841e90fdc8e38e2",
+  "object": "response",
+  "created_at": 1791253779,
+  "status": "completed",
+  "access_programs": null,
+  "background": false,
+  "billing": {
+    "payer": "developer"
+  },
+  "completed_at": 1791253781,
+  "error": null,
+  "frequency_penalty": 0.0,
+  "incomplete_details": null,
+  "instructions": "You are helpful.",
+  "max_output_tokens": null,
+  "max_tool_calls": null,
+  "model": "gpt-5-mini-2025-08-07",
+  "moderation": null,
+  "output": [
+    {
+      "id": "rs_0b9e48ed585cf091016ac45d13f78887d28eab5b1ca8e79924",
+      "type": "reasoning",
+      "content": [],
+      "encrypted_content": "gAAAAABqxF0VIuPZgosgVxYdu5sV46gkLLE1HmtqkB4u5Egr5c6BHEtR_gwQD7hTC0_mAze914L_cl0Id_L5G4bEZ22Qnq01oryKN2Srg0NCjVF9YuxkLHvamUdx9Z3V4PcG95kdj8bx3PLJMmDOvy7Pre9kisBBKQBea8u0kOYs8BFJjuA--vo9YEH3Cloznales1tmyJHjfvy1pi5kBjVEpQbOhNbVDk5ox-3UuldfA3WJM9ue2eNSEZfywkHiuIFaVUjfUXnu82h6Dc6KqhHqSTeWcZP0R_h5OQAvFaAiywDlawOPYW800Y38MvQgoe6AqNrQv0XJRI6KpPrceN_rufUmZRvC-32dY4XQKi7Lb9mFYGgcISo4y8oRXX-EdDSoSEjxk8jmlL4TwFodWeJGzCIlXJK-nil1Kn7e2agNTzHjP56chL9LpozX4KuTfNe1L71nrRd-uulfJmyWuoZBgQi6nItup3uIH3lrxixeCdtivzPuvqMsZGpkQxzzeV8Jb7OqAh6RLkCnS4jc3eHA5i8t0LsmwfKybMhaeJXQHMv8bAXINiN_9TgFUerxf5chzlsFAwUs1cBpvCFGwaSm4D20xyUlQ3ps6vvIq621p8L_MoD4sAen9WWA_-0QbTGvGxJo9UWbhTJ7478PvzqtZjP7SHfxa1Vgp93_OdYZtpg4dSncJUO-HIswY26VGWJ_QAT_Ur_pK2vADPliKrrFIOUYn1m1AzgEAPv9fP0xj-cWwI3se6j00Uu-Zb7f7pYGduRUv91l2f3OU5sgicanA1ZXrOO45PI7IzQY54zyhmGNzHdC1zDf64Ug-Hh0op-NcpVHSSNPG1zmrbEKlowvrqWxopO4Cy73NCo8uuhxDO_WOIPQXWg4RweMtiBfAPqBUq9EBsExcgnzfYbd2uSn4MJ8wv1DO9criz_VbFSuj-STpfho3X6qKqxuTz7x_P3OHTTX7S6FCotE8DwsPFC9Dddhsk4TlB6llmRZHulV1wsudG3aYUvVbMzyUHvNqsXs4T9cQ0Ff3gXQyXJxRc1aWV27EoaWPPNGt2_DZXk6Ii4rJmCSZfGw86SDM9aXlZkbkDNlXPKk4m_fUqesQHpFG9v3Ja0WYiqhwe4e4NXn5pPS0YqPu6xi6jZqMXFSdAn41jK4Q0aZwo4CBnH8PY9n0meDSJpk6-p74A8igBVHAknXdP_biNlpVbolo47juiFZoCeGlhV4UjprG3BLe53tAN1yu-iw8IFzHVMcBG1YoGgnUtSxXZkwiS8tQs0O1vGJKIJYoAlsS1D38lCBdaq70W2nwuyIus_rz_RtZwq6x9qzB6JSRZsxFMvmi1J-svYXAuOEIgKw72j415BRFs6YEyqVqtDzMapDl95dhDlyANYRgqJJqRcGGkLzHKdj7SgBP7EhUL16k2hMV4IroVo4OOyO9TS9geVFj9IYvkotubrdC1xbXTCYm1kBcAB0lytdowV5TLdHDcgBrxPcddMO8QOic50SraBAtskdFmBras-rbD7IbKuewi5ihEB_5NJ6hlqzxvHgXQ7JYaziFP0Y1FEGSIsQ0OAQz0w6tpmvL8hukEOMpZPdayOl1NtWs2G20A1o2rQC8dMGXOKfk5skeBIgG_Kp-1nuFd2NGTuVgiqWW3k99caHb-TEO1kvexsGujt59GhP-U82EzZM4BoThfnUrYqaIjuYHwzeU1z85dpEs-PPGQJQo3nVnLPDncTaLuil0crkd48iMjCNGEZPDbbs2icajmq6afCOa4XqApHTo6Ig3NTI52yt0d_bSMAG2txWfLbJi_8ne75CNyCP90w5F8oyerprhbAkBCLEiTfi-Y7tSdFhqZKyV9gTDm7WcG6QIeGU-5siIhbPRCYmi1GBpuqKXpIuRHA9W0ZVThfqwAyaRICS9GjR0SdKefKrs9_eyoqqn8wPAfiYF8JAazsd1V-H0woUzaZxyDNGMZsmx316KQYkhNLY2kmsi89lkGlFVJXrergy8hQ22nqiWl78-xtFHTnfA-n2oW_EFsrl_ettUwd68ug2QrrAsgZohwlXLqcaEfcB3g59WEK3171S_IWCog0HZqt2UKVfrUWphn7rTb8=",
+      "summary": []
+    },
+    {
+      "id": "fc_0b9e48ed585cf091016ac45d158f9887d2bdc0677524dbf23c",
+      "type": "function_call",
+      "status": "completed",
+      "arguments": "{\"location\":\"Paris\"}",
+      "call_id": "call_Trtcflgpii6SSLMJqb31zhpF",
+      "name": "get_weather"
+    },
+    {
+      "id": "fc_0b9e48ed585cf091016ac45d158fac87d2b491846a16d8d557",
+      "type": "function_call",
+      "status": "completed",
+      "arguments": "{\"location\":\"Tokyo\"}",
+      "call_id": "call_28NCLFqYOPmBovXFWrM5cJC6",
+      "name": "get_weather"
+    },
+    {
+      "id": "fc_0b9e48ed585cf091016ac45d158fb887d29ea275697553110d",
+      "type": "function_call",
+      "status": "completed",
+      "arguments": "{\"location\":\"Lima\"}",
+      "call_id": "call_8vqbesL7v7zTJ65Lvd6uzfkT",
+      "name": "get_weather"
+    }
+  ],
+  "parallel_tool_calls": true,
+  "presence_penalty": 0.0,
+  "previous_response_id": null,
+  "prompt_cache_key": null,
+  "prompt_cache_retention": "in_memory",
+  "reasoning": {
+    "context": "current_turn",
+    "effort": "medium",
+    "mode": "standard",
+    "summary": null
+  },
+  "safety_identifier": null,
+  "service_tier": "default",
+  "store": false,
+  "temperature": 1.0,
+  "text": {
+    "format": {
+      "type": "text"
+    },
+    "verbosity": "medium"
+  },
+  "tool_choice": "auto",
+  "tool_usage": {
+    "image_gen": {
+      "input_tokens": 0,
+      "input_tokens_details": {
+        "image_tokens": 0,
+        "text_tokens": 0
+      },
+      "output_tokens": 0,
+      "output_tokens_details": {
+        "image_tokens": 0,
+        "text_tokens": 0
+      },
+      "total_tokens": 0
+    },
+    "web_search": {
+      "num_requests": 0
+    }
+  },
+  "tools": [
+    {
+      "type": "function",
+      "description": "Look up the current weather in a city.",
+      "name": "get_weather",
+      "output_schema": null,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "location": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "location"
+        ],
+        "additionalProperties": false
+      },
+      "strict": true
+    }
+  ],
+  "top_logprobs": 0,
+  "top_p": 1.0,
+  "truncation": "disabled",
+  "usage": {
+    "input_tokens": 71,
+    "input_tokens_details": {
+      "cache_write_tokens": 0,
+      "cached_tokens": 0
+    },
+    "output_tokens": 206,
+    "output_tokens_details": {
+      "reasoning_tokens": 128
+    },
+    "total_tokens": 277
+  },
+  "user": null,
+  "metadata": {}
+}

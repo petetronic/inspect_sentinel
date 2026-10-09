@@ -1,0 +1,5 @@
+# Who Middleman lets in: holders of a token the stack's own sign-in issued.
+auth_providers:
+  - issuer: http://signin:18500/
+    audiences: [always-sunny]
+    jwks_uri: http://signin:18500/jwks.json

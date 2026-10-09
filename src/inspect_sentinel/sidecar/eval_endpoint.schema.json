@@ -1,0 +1,404 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "EvalDetails": {
+      "description": "The task and the sample a run is: what a sentinel is given as `context.eval`.",
+      "properties": {
+        "task": {
+          "title": "Task",
+          "type": "string"
+        },
+        "task_description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Task Description"
+        },
+        "sample_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            }
+          ],
+          "title": "Sample Id"
+        },
+        "epoch": {
+          "title": "Epoch",
+          "type": "integer"
+        },
+        "sample_description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sample Description"
+        },
+        "sample_input": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            }
+          ],
+          "description": "A string, or chat messages as inspect_ai writes them to JSON.",
+          "title": "Sample Input"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "title": "Metadata",
+          "type": "object"
+        }
+      },
+      "required": [
+        "task",
+        "sample_id",
+        "epoch",
+        "sample_input"
+      ],
+      "title": "EvalDetails",
+      "type": "object"
+    },
+    "Recorded": {
+      "description": "One thing recorded while a sentinel examined a step.",
+      "properties": {
+        "kind": {
+          "enum": [
+            "record",
+            "failed",
+            "cancelled",
+            "bypassed",
+            "superseded"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "path": {
+          "description": "The instance path of the monitor or protocol.",
+          "title": "Path",
+          "type": "string"
+        },
+        "factory": {
+          "description": "Registry name of the instance's factory.",
+          "title": "Factory",
+          "type": "string"
+        },
+        "name": {
+          "description": "The instance's name.",
+          "title": "Name",
+          "type": "string"
+        },
+        "call": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The id of the tool call the step was about.",
+          "title": "Call"
+        },
+        "report": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The observation or decision, for `record` and `superseded`.",
+          "title": "Report"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What the monitor raised, for `failed`.",
+          "title": "Error"
+        }
+      },
+      "required": [
+        "kind",
+        "path",
+        "factory",
+        "name"
+      ],
+      "title": "Recorded",
+      "type": "object"
+    },
+    "RegisterRunParams": {
+      "description": "Parameters of `register_run`.",
+      "properties": {
+        "run": {
+          "description": "The name the run's model requests carry.",
+          "title": "Run",
+          "type": "string"
+        },
+        "resume": {
+          "default": false,
+          "description": "Whether the eval is carrying on a run it began earlier.",
+          "title": "Resume",
+          "type": "boolean"
+        },
+        "eval": {
+          "$ref": "#/$defs/EvalDetails"
+        }
+      },
+      "required": [
+        "run",
+        "eval"
+      ],
+      "title": "RegisterRunParams",
+      "type": "object"
+    },
+    "RegisterRunResult": {
+      "description": "Result of `register_run`.",
+      "properties": {
+        "run": {
+          "title": "Run",
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "new",
+            "resumed"
+          ],
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run",
+        "state"
+      ],
+      "title": "RegisterRunResult",
+      "type": "object"
+    },
+    "RequestResultParams": {
+      "description": "Parameters of `request_result`.",
+      "properties": {
+        "id": {
+          "description": "The id the eval put on the request, in the header the sidecar reads it from. That header is inspect_ai's `x-irid` unless the sidecar was started with another.",
+          "title": "Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "RequestResultParams",
+      "type": "object"
+    },
+    "RequestResultResult": {
+      "description": "Result of `request_result`.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "records": {
+          "description": "`held` if the records follow, `dropped` if they are no longer kept, `unknown` if the request was never seen. Only `held` has the other fields.",
+          "enum": [
+            "held",
+            "dropped",
+            "unknown"
+          ],
+          "title": "Records",
+          "type": "string"
+        },
+        "state": {
+          "anyOf": [
+            {
+              "enum": [
+                "judging",
+                "awaiting_reply",
+                "decided",
+                "not_judged"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Where the latest attempt at the request stands. `judging`: the sentinel is at work on it. `awaiting_reply`: the request went on and the proxy has handed over no reply, which it never does for a call the provider failed. `decided`: `outcome` says what. `not_judged`: judging ended without a decision, and `reason` says why.",
+          "title": "State"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "enum": [
+                "unreadable",
+                "time_limit",
+                "error",
+                "provider_error"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Why the request was not judged. `unreadable`: it or its reply couldn't be read. `time_limit`: the sentinel passed its time limit. `error`: the sentinel raised. `provider_error`: the provider's reply was an error, so there was nothing to judge.",
+          "title": "Reason"
+        },
+        "outcome": {
+          "anyOf": [
+            {
+              "enum": [
+                "continue",
+                "reject",
+                "terminate"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What the sentinel decided for the latest attempt at the request, where `state` is `decided`.",
+          "title": "Outcome"
+        },
+        "message": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What the model is told.",
+          "title": "Message"
+        },
+        "recorded": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/Recorded"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Recorded"
+        }
+      },
+      "required": [
+        "id",
+        "records"
+      ],
+      "title": "RequestResultResult",
+      "type": "object"
+    },
+    "RunResultParams": {
+      "description": "Parameters of `run_result`.",
+      "properties": {
+        "run": {
+          "title": "Run",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run"
+      ],
+      "title": "RunResultParams",
+      "type": "object"
+    },
+    "RunResultResult": {
+      "description": "Result of `run_result`.",
+      "properties": {
+        "run": {
+          "title": "Run",
+          "type": "string"
+        },
+        "outcome": {
+          "enum": [
+            "continue",
+            "terminate"
+          ],
+          "title": "Outcome",
+          "type": "string"
+        },
+        "store": {
+          "additionalProperties": true,
+          "title": "Store",
+          "type": "object"
+        }
+      },
+      "required": [
+        "run",
+        "outcome",
+        "store"
+      ],
+      "title": "RunResultResult",
+      "type": "object"
+    }
+  },
+  "title": "Inspect Sentinel: the endpoint for evals",
+  "description": "JSON-RPC 2.0 methods, POSTed to /sentinel/v1. `methods` names the definitions that a method's `params` and its `result` fit.",
+  "methods": {
+    "register_run": {
+      "params": {
+        "$ref": "#/$defs/RegisterRunParams"
+      },
+      "result": {
+        "$ref": "#/$defs/RegisterRunResult"
+      }
+    },
+    "request_result": {
+      "params": {
+        "$ref": "#/$defs/RequestResultParams"
+      },
+      "result": {
+        "$ref": "#/$defs/RequestResultResult"
+      }
+    },
+    "run_result": {
+      "params": {
+        "$ref": "#/$defs/RunResultParams"
+      },
+      "result": {
+        "$ref": "#/$defs/RunResultResult"
+      }
+    }
+  }
+}

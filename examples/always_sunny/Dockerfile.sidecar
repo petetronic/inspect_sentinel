@@ -1,0 +1,29 @@
+# The sidecar, with what it needs to read Anthropic's and OpenAI's traffic.
+# Built from the repository root.
+FROM ghcr.io/astral-sh/uv:0.12.23@sha256:61d393e44e249f2e4b526b6c7ddcecce245946826e608e11c93ad4f5bba55b21 AS uv
+
+FROM python:3.13-slim@sha256:8d9d0b8bcf6506481eae4907c18f5e3e7902e629f5f6d684f9e7c32e85e3ddf0
+
+# inspect-ai is installed from its git repository
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        git \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=uv /uv /usr/local/bin/uv
+
+WORKDIR /src
+# the package takes its version from git, which stays out of the image
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0
+COPY pyproject.toml uv.lock README.md ./
+COPY src ./src
+RUN uv sync \
+        --frozen \
+        --no-dev \
+        --extra anthropic \
+        --extra openai \
+        --extra sidecar
+ENV PATH=/src/.venv/bin:$PATH
+
+EXPOSE 8900 8901
+ENTRYPOINT ["python", "-m", "inspect_sentinel.sidecar", "--host", "0.0.0.0", "--port", "8900", "--eval-host", "0.0.0.0", "--eval-port", "8901"]

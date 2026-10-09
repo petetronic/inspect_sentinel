@@ -1,0 +1,61 @@
+{
+  "id": "chatcmpl-EVpDqgRJWkEFGXbwElDF2RtP1a7VB",
+  "object": "chat.completion",
+  "created": 1791253774,
+  "model": "gpt-5-mini-2025-08-07",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [
+          {
+            "id": "call_kihylcWC1hJpgZ2RLGEyPBSu",
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "arguments": "{\"location\": \"Paris\"}"
+            }
+          },
+          {
+            "id": "call_jyCWhe286KGwWFpnb1LhAvof",
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "arguments": "{\"location\": \"Tokyo\"}"
+            }
+          },
+          {
+            "id": "call_YkTbh2qacbax5lLZJR1wAfD0",
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "arguments": "{\"location\": \"Lima\"}"
+            }
+          }
+        ],
+        "refusal": null,
+        "annotations": []
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 152,
+    "completion_tokens": 196,
+    "total_tokens": 348,
+    "prompt_tokens_details": {
+      "cached_tokens": 0,
+      "audio_tokens": 0
+    },
+    "completion_tokens_details": {
+      "reasoning_tokens": 128,
+      "audio_tokens": 0,
+      "accepted_prediction_tokens": 0,
+      "rejected_prediction_tokens": 0
+    }
+  },
+  "service_tier": "default",
+  "system_fingerprint": null
+}

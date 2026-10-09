@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "inspect_sentinel_middleman"
+version = "0.1.0"
+description = "A hook for METR's Middleman that calls a remote Inspect Sentinel endpoint over HTTPS."
+authors = [{ name = "Meridian Labs" }]
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT License" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Typing :: Typed",
+]
+# Both are Middleman's own dependencies, at Middleman's own floors, so that
+# installing this beside Middleman changes nothing it has. Nothing of
+# inspect_sentinel or inspect_ai is needed, or wanted, in Middleman's process.
+dependencies = ["aiohttp>=3.9.5", "fastapi>=0.92.0"]
+
+[project.urls]
+"Source Code" = "https://github.com/meridianlabs-ai/inspect_sentinel/tree/main/src/proxies/middleman"
+"Issue Tracker" = "https://github.com/meridianlabs-ai/inspect_sentinel/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["inspect_sentinel_middleman"]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["inspect_sentinel_middleman", "README.md", "LICENSE"]

@@ -1,0 +1,5 @@
+// The models this stack serves. Add one here to use it with the example.
+[
+  {"public_name": "claude-haiku-4-5", "danger_name": "claude-haiku-4-5", "lab": "anthropic", "group": "model-access-public"},
+  {"public_name": "gpt-5-mini", "danger_name": "gpt-5-mini", "lab": "openai-chat", "group": "model-access-public"}
+]

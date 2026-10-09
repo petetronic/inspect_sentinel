@@ -25,6 +25,7 @@ def test_author_facing_names_are_exported() -> None:
         "Suspicion",
         "Action",
         "Context",
+        "ProxyContext",
         "Host",
         "HumanAnswer",
         "Report",

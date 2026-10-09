@@ -1,0 +1,4 @@
+# The sidecar's sentinel. `always_sunny` is defined in sentinels.py, which the
+# sidecar is told to load first.
+sentinel:
+  name: always_sunny
