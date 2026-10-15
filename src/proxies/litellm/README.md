@@ -59,6 +59,15 @@ The body is what LiteLLM is about to send, with one thing put right. LiteLLM wri
 
 The calls and their results are described by [`proxy_endpoint.schema.json`](https://github.com/meridianlabs-ai/inspect_sentinel/blob/main/src/inspect_sentinel/sidecar/proxy_endpoint.schema.json).
 
+## What an Inspect eval is told
+
+When a request comes from an Inspect eval, the sidecar answers with a `sentinel` field that says what was decided, and the guardrail passes it on so that it reaches the eval on every route, streamed or not:
+
+- On a reply that goes on, the field sits beside the reply's own fields, or in the last event of a stream that the provider's SDK reads. LiteLLM drops a field it doesn't know from a Chat Completions chunk, so the guardrail sends that last chunk as written.
+- On a refusal, LiteLLM puts the field in its error, at `error.provider_specific_fields.sentinel`, beside the sentinel's message. A refused Responses stream is answered with a `response.failed` event that holds the field, which the guardrail sends in place of LiteLLM's own.
+
+Any other client is sent the reply, or the refusal, with no field.
+
 ## The sidecar's routes for evals
 
 An Inspect eval knows only the base URL of the model API it calls, which here is LiteLLM's. So the guardrail adds a route to LiteLLM's app: everything under `/sentinel/` is passed on to the sidecar at `api_base`, which is where the eval talks to the sidecar. Nothing else needs setting up.

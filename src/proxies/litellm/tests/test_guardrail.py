@@ -409,20 +409,50 @@ def test_exchange_the_sentinel_allows_goes_on_as_it_is(
         ]
 
 
+def _refused(
+    guardrail: Any, on: _On, data: dict[str, Any], streamed: bool
+) -> tuple[int, Any, Any, list[Any]]:
+    """How the guardrail refused an exchange: the status and message the caller is given, the sentinel field, and what else went out.
+
+    A streamed Responses reply is refused with a `response.failed` event, which LiteLLM sends on with status 200. Anything else is refused with an `HTTPException`, whose `provider_specific_fields` LiteLLM writes into the error.
+    """
+    let_go: list[Any] = []
+    if on is _RESPONSES and streamed:
+        _exchange(guardrail, on, data, streamed, let_go)
+        failed = let_go.pop()
+        assert isinstance(failed, bytes)
+        name, data_line = failed.decode().strip().split("\n")
+        assert name == "event: response.failed"
+        event = json.loads(data_line.removeprefix("data: "))
+        assert event["response"]["status"] == "failed"
+        return 200, event["response"]["error"]["message"], event.get("sentinel"), let_go
+    with pytest.raises(HTTPException) as refused:
+        _exchange(guardrail, on, data, streamed, let_go)
+    extra: dict[str, Any] = (
+        getattr(refused.value, "provider_specific_fields", None) or {}
+    )
+    return (
+        refused.value.status_code,
+        refused.value.detail,
+        extra.get("sentinel"),
+        let_go,
+    )
+
+
 @pytest.mark.parametrize(("on", "streamed"), _ROUTES)
 def test_reply_the_sentinel_rejects_is_refused_in_its_words(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, on: _On, streamed: bool
 ) -> None:
-    let_go: list[Any] = []
     # the recorded Responses stream is the one reply that names the country too
     city = "Paris, France" if on is _RESPONSES and streamed else "Paris"
 
     with _sidecar(city, tmp_path) as url:
-        with pytest.raises(HTTPException) as refused:
-            _exchange(_make(monkeypatch, url), on, _data(on), streamed, let_go)
+        status, message, _, let_go = _refused(
+            _make(monkeypatch, url), on, _data(on), streamed
+        )
 
-    assert refused.value.status_code == 400
-    assert refused.value.detail == (
+    assert status == (200 if on is _RESPONSES and streamed else 400)
+    assert message == (
         f"A sentinel rejected the call to get_weather: {city} is not allowed."
     )
     # none of a streamed reply had gone out
@@ -601,15 +631,87 @@ def test_reply_is_replaced_in_the_form_litellm_had_it(
 def test_reply_is_refused_as_asked(
     monkeypatch: pytest.MonkeyPatch, on: _On, streamed: bool
 ) -> None:
-    let_go: list[Any] = []
     answers = (_result({"action": "pass"}), _result(_REFUSAL))
 
     with _serving(_scripted([], *answers)) as url:
-        with pytest.raises(HTTPException) as refused:
-            _exchange(_make(monkeypatch, url), on, _data(on), streamed, let_go)
+        status, message, field, let_go = _refused(
+            _make(monkeypatch, url), on, _data(on), streamed
+        )
 
-    assert (refused.value.status_code, refused.value.detail) == (403, "Not allowed.")
+    assert (status, message) == (
+        200 if on is _RESPONSES and streamed else 403,
+        "Not allowed.",
+    )
+    # a client that isn't Inspect is sent no field
+    assert field is None
     assert let_go == []
+
+
+_FIELD: dict[str, Any] = {"version": 1, "outcome": "reject", "steps": []}
+
+
+@pytest.mark.parametrize(("on", "streamed"), _ROUTES)
+def test_a_refusal_carries_the_sentinel_field(
+    monkeypatch: pytest.MonkeyPatch, on: _On, streamed: bool
+) -> None:
+    answers = (_result({"action": "pass"}), _result(_REFUSAL | {"sentinel": _FIELD}))
+
+    with _serving(_scripted([], *answers)) as url:
+        _, message, field, _ = _refused(
+            _make(monkeypatch, url), on, _data(on), streamed
+        )
+
+    assert (message, field) == ("Not allowed.", _FIELD)
+
+
+@pytest.mark.parametrize("on", [_MESSAGES, _CHAT, _RESPONSES])
+def test_a_refused_request_carries_the_sentinel_field(
+    monkeypatch: pytest.MonkeyPatch, on: _On
+) -> None:
+    with _serving(_scripted([], _result(_REFUSAL | {"sentinel": _FIELD}))) as url:
+        with pytest.raises(HTTPException) as refused:
+            _exchange(_make(monkeypatch, url), on, _data(on), False)
+
+    extra = getattr(refused.value, "provider_specific_fields", None)
+    assert extra == {"sentinel": _FIELD}
+
+
+def test_a_responses_stream_is_failed_as_the_response_it_began() -> None:
+    from inspect_sentinel_litellm import _guardrail
+
+    begun = _RESPONSES.stream()
+    refused = HTTPException(403, "Not allowed.")
+    setattr(refused, "provider_specific_fields", {"sentinel": _FIELD})  # noqa: B010
+
+    written = _guardrail._response_failed(begun, refused)  # pyright: ignore[reportPrivateUsage]
+
+    event = json.loads(written.decode().split("data: ", 1)[1])
+    created = _written(begun[0])["response"]
+    assert event["response"]["id"] == created["id"]
+    assert event["sequence_number"] == _written(begun[-1])["sequence_number"] + 1
+    assert event["response"]["error"]["message"] == "Not allowed."
+    assert event["sentinel"] == _FIELD
+
+
+def test_a_replaced_chat_stream_sends_the_chunk_with_the_field_as_written(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = [_written(chunk) for chunk in _CHAT.stream()]
+    events[-1] = events[-1] | {"sentinel": _FIELD}
+    body = "".join(f"data: {json.dumps(event)}\n\n" for event in events).encode()
+    answers = (
+        _result({"action": "pass"}),
+        _result({"action": "replace", "body": base64.b64encode(body).decode()}),
+    )
+
+    with _serving(_scripted([], *answers)) as url:
+        _, let_go = _exchange(_make(monkeypatch, url), _CHAT, _data(_CHAT), True)
+
+    # LiteLLM writes its own chunks without a field they don't have, and
+    # passes on as it is a chunk already written
+    *chunks, last = let_go
+    assert not any(isinstance(chunk, bytes) for chunk in chunks)
+    assert json.loads(last.decode().removeprefix("data: ")) == events[-1]
 
 
 _NOT_BASE64 = {"action": "replace", "body": "not base64!"}

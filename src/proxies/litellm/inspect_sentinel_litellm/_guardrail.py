@@ -48,6 +48,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger("inspect_sentinel_litellm")
 
 _RESPONSES = "openai-responses"
+_CHAT = "openai-chat"
 # LiteLLM's name for the route a request came in on, and what a body on that
 # route is written in whichever provider serves the model: whose API, and which
 _APIS: dict[str, tuple[str, str]] = {
@@ -273,9 +274,17 @@ class LiteLLMGuardrail(CustomGuardrail):
                 ended = True
                 answer = await self._ask_about_reply(told, _STREAM, b"".join(written))
                 if answer["action"] == "replace":
-                    held = _replaced_stream(held, _replacement(answer))
+                    held = _replaced_stream(held, _replacement(answer), told["format"])
             except SidecarError:
                 self._unanswered()
+            except HTTPException as refused:
+                if told["format"] != _RESPONSES:
+                    raise
+                # LiteLLM answers a refused Responses stream with its own
+                # `response.failed` event, holding the refusal as text, so the
+                # guardrail sends one with the sentinel field instead
+                yield _response_failed(held, refused)
+                return
         for chunk in held:
             yield chunk
         # what was never held: a reply the sidecar was not asked about, or the
@@ -657,7 +666,7 @@ def _replaced_whole(response: Any, body: bytes) -> Any:
         raise _failed("a replaced reply LiteLLM can't take") from None
 
 
-def _replaced_stream(held: list[Any], body: bytes) -> list[Any]:
+def _replaced_stream(held: list[Any], body: bytes, format: str) -> list[Any]:
     classes = {
         getattr(chunk, "type", None): type(chunk)
         for chunk in held
@@ -669,7 +678,15 @@ def _replaced_stream(held: list[Any], body: bytes) -> list[Any]:
     # elsewhere LiteLLM streams its own classes, one to an event, and each
     # replaced event is made in the class the reply had for that kind of event
     try:
-        replaced = [classes[event.get("type")](**event) for event in _events(body)]
+        replaced = [
+            # LiteLLM writes a Chat Completions chunk with a writer that drops
+            # a field its class doesn't have, so the chunk that carries the
+            # sentinel field is sent as written, which LiteLLM passes on as it is
+            f"data: {json.dumps(event)}\n\n".encode()
+            if format == _CHAT and "sentinel" in event
+            else classes[event.get("type")](**event)
+            for event in _events(body)
+        ]
     except Exception:
         raise _failed("a replaced reply stream LiteLLM can't take") from None
     if not replaced:
@@ -704,7 +721,43 @@ def _refusal(answer: dict[str, Any]) -> HTTPException:
         # whatever `unreachable_fallback` says of a failure
         logger.warning("The sentinel sidecar's refusal could not be read.")
         return HTTPException(503, "The sentinel sidecar's refusal could not be read.")
-    return HTTPException(status, message)
+    refused = HTTPException(status, message)
+    field = answer.get("sentinel")
+    if isinstance(field, dict):
+        # LiteLLM writes these into the error it answers with, beside its own
+        # fields, at `error.provider_specific_fields`
+        setattr(refused, "provider_specific_fields", {"sentinel": field})  # noqa: B010
+    return refused
+
+
+def _response_failed(held: list[Any], refused: HTTPException) -> bytes:
+    # the event that ends a Responses stream that failed, built on the
+    # response the stream began, with the refusal and the sentinel field
+    events = [
+        chunk.model_dump(exclude_none=True)
+        for chunk in held
+        if isinstance(chunk, BaseModel)
+    ]
+    begun: dict[str, Any] = {}
+    for event in events:
+        if event.get("type") == "response.created":
+            begun = cast("dict[str, Any]", event["response"])
+            break
+    response: dict[str, Any] = {
+        **begun,
+        "status": "failed",
+        "error": {"code": "server_error", "message": str(refused.detail)},
+    }
+    sequence = max((event.get("sequence_number", 0) for event in events), default=0)
+    event: dict[str, Any] = {
+        "type": "response.failed",
+        "sequence_number": sequence + 1,
+        "response": response,
+    }
+    extra = getattr(refused, "provider_specific_fields", None)
+    if isinstance(extra, dict) and "sentinel" in extra:
+        event["sentinel"] = cast("dict[str, Any]", extra)["sentinel"]
+    return f"event: response.failed\ndata: {json.dumps(event)}\n\n".encode()
 
 
 def _failed(reason: str) -> SidecarError:
