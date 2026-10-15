@@ -11,6 +11,8 @@ Runnable sentinel configurations, each watching a short `react()` agent that has
 | `escalate_to_human.py` | A person in the loop: a rule that rejects, escalates or proceeds, ahead of `human()` in a `sequential()`, so the person is asked only about escalated calls | `inspect eval examples/escalate_to_human.py --model openai/gpt-5-mini` |
 | `escalate_turn_to_human.py` | A person deciding about a whole assistant turn: a rule at `AfterGenerate` escalates a turn whose calls delete files, and `human(stages=["model_output"])` shows the person the turn's text and every call before any of them runs | `inspect eval examples/escalate_turn_to_human.py --model openai/gpt-5-mini` |
 
+[`always_sunny/`](always_sunny) is different in kind: its sentinel runs in a sidecar beside a model proxy, LiteLLM, not in the eval, and its task has no `sentinel=`. It has its own README.
+
 The checks are deliberately simple, to keep the examples readable. Rules are cheap and run without a model call. They match a call's text and structured arguments, and they cannot prove a call safe: a different tool, or a string built at run time, can get past one. Anything that needs an understanding of shell or code goes to an LLM monitor, or is escalated to a person, typically `sequential([rule(), llm_monitor(), human()])`. In these examples the container's `network_mode: none` is what keeps the agent off the network.
 
 ## Running

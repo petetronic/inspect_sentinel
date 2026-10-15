@@ -142,7 +142,10 @@ addopts = "-n auto"
 timeout = 120
 
 [tool.pyright]
-include = ["src", "tests", "examples"]
+# src/proxies is left out: a proxy hook imports its proxy, which is never in
+# this environment. `make check-litellm` checks the LiteLLM guardrail in one
+# of its own.
+include = ["src/inspect_sentinel", "tests", "examples"]
 typeCheckingMode = "strict"
 pythonPlatform = "All"
 pythonVersion = "3.11"

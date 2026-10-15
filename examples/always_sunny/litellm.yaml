@@ -1,0 +1,27 @@
+# LiteLLM's configuration for the always_sunny stack. See README.md.
+model_list:
+  # the name an eval asks for, and the provider's model LiteLLM calls for it
+  - model_name: claude-haiku-4-5
+    litellm_params:
+      model: anthropic/claude-haiku-4-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+  - model_name: gpt-5-mini
+    litellm_params:
+      model: openai/gpt-5-mini
+      api_key: os.environ/OPENAI_API_KEY
+
+guardrails:
+  # this repository's guardrail for LiteLLM, which sends each model request
+  # and each reply to the sidecar. No sentinel runs inside LiteLLM.
+  - guardrail_name: inspect-sentinel
+    litellm_params:
+      guardrail: inspect_sentinel_litellm.LiteLLMGuardrail
+      # a sentinel judges the tool calls in a reply, so the guardrail is shown
+      # replies as well as requests
+      mode: [pre_call, post_call]
+      default_on: true
+      api_base: http://sidecar:8900
+
+general_settings:
+  # what your eval signs in to LiteLLM with
+  master_key: os.environ/LITELLM_MASTER_KEY

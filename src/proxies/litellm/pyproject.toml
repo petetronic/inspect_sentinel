@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "inspect_sentinel_litellm"
+version = "0.1.0"
+description = "A guardrail for the LiteLLM proxy that calls a remote Inspect Sentinel endpoint over HTTPS."
+authors = [{ name = "Meridian Labs" }]
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT License" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Typing :: Typed",
+]
+# The guardrail is a subclass of LiteLLM's own guardrail class and runs in
+# LiteLLM's proxy. The others are that proxy's own dependencies, at the floors
+# it had at this floor, so that installing this beside LiteLLM changes nothing
+# it has. Nothing of inspect_sentinel or inspect_ai is needed, or wanted, in
+# LiteLLM's process.
+dependencies = [
+    "litellm[proxy]>=1.83.0",
+    "aiohttp>=3.10",
+    "fastapi>=0.120.1",
+    "pydantic>=2.5.0",
+]
+
+[project.urls]
+"Source Code" = "https://github.com/meridianlabs-ai/inspect_sentinel/tree/main/src/proxies/litellm"
+"Issue Tracker" = "https://github.com/meridianlabs-ai/inspect_sentinel/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["inspect_sentinel_litellm"]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["inspect_sentinel_litellm", "README.md", "LICENSE"]
+
+# The tests run in an environment of their own, with one LiteLLM version, and
+# never import inspect_sentinel: see `make test-litellm`. A test that needs a
+# real sidecar starts one from the repository's own environment.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 120
+
+[tool.pyright]
+include = ["inspect_sentinel_litellm", "tests"]
+typeCheckingMode = "strict"
+pythonPlatform = "All"
+pythonVersion = "3.11"
+
+# tests may exercise private helpers directly
+[[tool.pyright.executionEnvironments]]
+root = "tests"
+reportPrivateUsage = false

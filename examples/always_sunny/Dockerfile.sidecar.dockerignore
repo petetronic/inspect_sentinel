@@ -1,0 +1,7 @@
+# only what the build copies; git metadata and local environments stay out
+*
+!README.md
+!pyproject.toml
+!src
+!uv.lock
+!examples/always_sunny/rule

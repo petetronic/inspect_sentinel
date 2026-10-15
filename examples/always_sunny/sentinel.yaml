@@ -1,0 +1,4 @@
+# The sidecar's sentinel: the always_sunny rule, from the weather_rules
+# package in rule/.
+sentinel:
+  name: weather_rules/always_sunny

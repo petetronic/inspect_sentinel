@@ -1,0 +1,4 @@
+# only what the build copies; git metadata and local environments stay out
+*
+!src/proxies/litellm
+**/__pycache__
