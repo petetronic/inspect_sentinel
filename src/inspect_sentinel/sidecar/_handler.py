@@ -15,7 +15,7 @@ from inspect_ai.model import (
 from inspect_ai.tool import ToolCall
 from pydantic import JsonValue
 
-from .._context import ProxyContext
+from .._context import EvalContext, InspectSample, ProxyContext
 from .._host import HostNative
 from .._integration import HostContext, resolve_sentinel, run_sentinel, watched_stages
 from .._report import Decision
@@ -28,7 +28,7 @@ from .._step import (
 )
 from .._types import Sentinels
 from ._exchange import Answer, Pass, Refuse, Replace, Reply, Request
-from ._host import Record, SidecarHost, stage
+from ._host import Record, RunHost, SidecarHost, stage
 from ._inspect_ai import tool_call_view
 from ._inspect_client import (
     Exchange,
@@ -37,6 +37,14 @@ from ._inspect_client import (
     inspect_sample,
     sentinel_field,
     with_sentinel,
+)
+from ._registration import (
+    MAX_TASK_EXPIRY,
+    TASK_EXPIRY,
+    FileTask,
+    RegistrationError,
+    TaskFacts,
+    UnregisteredSampleError,
 )
 from ._state import (
     MADE_KEPT,
@@ -91,6 +99,9 @@ class Handler:
         reject_status: int = 400,
         time_limit: float | None = None,
         eval_results: bool = True,
+        tasks: Mapping[str, FileTask] | None = None,
+        task_registration: bool = True,
+        task_expiry: float = MAX_TASK_EXPIRY,
     ) -> None:
         """Create a handler.
 
@@ -101,6 +112,9 @@ class Handler:
             reject_status: The HTTP status a rejected turn is refused with. The default, 400, is one a client takes as final. A status a client retries by itself, such as 503, brings the client back with the same request, which then goes on with the rejection added.
             time_limit: The longest the sentinel may take to judge one request or one reply, in seconds, after which it is cancelled. None, the default, is no limit.
             eval_results: Whether an Inspect client's `sentinel` field holds the results: the explanations, references and metadata of the decisions, and what each monitor and protocol recorded. Without them, it holds only what Inspect acts on. A monitor's explanation tells an agent what the monitor looks for, so a client that can't be trusted is not sent them.
+            tasks: Tasks registered beforehand, by name, as a tasks file holds them. Nothing an eval registers replaces one, and a request for a sample one doesn't hold is refused.
+            task_registration: Whether an eval may register its tasks itself, at task init.
+            task_expiry: The longest a task an eval registered is kept once no request has named it, in seconds, whatever the registration asks.
         """
         self._protocol = resolve_sentinel(sentinel)
         # a stage nothing watches is never built, as in Inspect's own process
@@ -110,6 +124,9 @@ class Handler:
         self._reject_status = reject_status
         self._time_limit = time_limit
         self._eval_results = eval_results
+        self._tasks = dict(tasks or {})
+        self._task_registration = task_registration
+        self._task_expiry = task_expiry
         # the tool results being judged now, by run, conversation and digest,
         # so that a request holding one waits for the request judging it
         self._judging: dict[tuple[str, str, str], anyio.Event] = {}
@@ -130,6 +147,7 @@ class Handler:
 
         Raises:
             UnreadableError: If the request, or its `x-inspect-context` header, can't be read, so neither it nor its reply could be judged.
+            UnregisteredSampleError: If the request names a sample that a task registered beforehand doesn't hold.
             TimeLimitError: If the handler has a time limit and the sentinel didn't finish within it.
         """
         with anyio.move_on_after(self._time_limit):
@@ -166,6 +184,50 @@ class Handler:
         """
         return await self._state.records(id)
 
+    async def register_task(
+        self, eval_id: str, facts: TaskFacts, expiry: float | None = None
+    ) -> float:
+        """Keep a task an eval registered, so that its runs' sentinels are told which sample each is.
+
+        A registration replaces the eval's last one for the task. A run that has already found its sample keeps what it found.
+
+        Args:
+            eval_id: The eval's id, as its requests name it.
+            facts: The task and its samples.
+            expiry: How long to keep it once no request has named the task, in seconds. A day if not given.
+
+        Returns:
+            How long it is kept once no request has named the task: `expiry`, or less if that is longer than the handler keeps any.
+
+        Raises:
+            RegistrationError: If the handler takes no registrations from evals, or the task was registered beforehand.
+        """
+        if not self._task_registration:
+            raise RegistrationError(
+                "This sidecar takes no tasks registered by an eval."
+            )
+        if facts.task in self._tasks:
+            raise RegistrationError(
+                f"The task {facts.task!r} is registered with this sidecar beforehand, and an eval can't replace it."
+            )
+        granted = min(expiry if expiry is not None else TASK_EXPIRY, self._task_expiry)
+        await self._state.register(eval_id, facts.task, facts, granted)
+        return granted
+
+    async def _eval(self, sample: InspectSample) -> EvalContext | None:
+        # the sample a request names, from the task's registration; asking
+        # counts as the task being named, so its registration is kept
+        fixed = self._tasks.get(sample.task)
+        if fixed is None:
+            facts = await self._state.registration(sample.eval_id, sample.task)
+            return facts.eval_context(sample) if facts is not None else None
+        found = fixed.eval_context(sample)
+        if found is None:
+            raise UnregisteredSampleError(
+                f"The task {sample.task!r} is registered with this sidecar beforehand, without the sample {sample.sample_id!r}."
+            )
+        return found
+
     async def _request(self, request: Request) -> Answer:
         sample = inspect_sample(request.headers)
         proxy = ProxyContext(
@@ -190,6 +252,11 @@ class Handler:
         )
         sends = offered(request.provider, request.body, request.format)
         marks = request_marks(request.provider, request.body, request.format)
+        if sample is not None:
+            found = await self._eval(sample)
+            if run.eval is None:
+                # a run keeps the facts it first found
+                run.eval = found
         refusal = _ended(run, marks)
         if refusal is not None:
             # the run has ended, and the sentinel is not asked again
@@ -509,7 +576,7 @@ class Handler:
         decision = await run_sentinel(
             self._protocol,
             HostContext(
-                host=self._host,
+                host=RunHost(self._host, run.eval),
                 recorder=held.recorder,
                 store=run.store,
                 proxy=held.proxy,

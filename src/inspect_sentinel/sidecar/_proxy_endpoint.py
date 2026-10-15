@@ -24,12 +24,14 @@ from ._json_rpc import (
     SENTINEL_FAILED,
     TIME_LIMIT,
     UNREADABLE,
+    UNREGISTERED,
     RpcError,
     answered,
     failed,
     invalid_params,
     read_call,
 )
+from ._registration import UnregisteredSampleError
 from ._wire import Format, UnreadableError
 
 logger = logging.getLogger(__name__)
@@ -124,6 +126,10 @@ _ERRORS: dict[int, tuple[str, str]] = {
         "time_limit",
         f"The sentinel didn't finish judging within the sidecar's time limit, and was cancelled. {_NOT_JUDGED}",
     ),
+    UNREGISTERED: (
+        "unregistered",
+        f"The request names a sample that a task registered with the sidecar beforehand doesn't hold, so it is not part of the eval that was registered. {_NOT_JUDGED}",
+    ),
 }
 
 _METHODS: dict[str, tuple[type[BaseModel], tuple[type[BaseModel], ...]]] = {
@@ -195,6 +201,8 @@ async def _judge(handler: Handler, method: str, params: dict[str, Any]) -> BaseM
         return _result(await judging, reply=what == "reply")
     except TimeLimitError as ex:
         raise RpcError(TIME_LIMIT, str(ex)) from None
+    except UnregisteredSampleError as ex:
+        raise RpcError(UNREGISTERED, str(ex)) from None
     except UnreadableError as ex:
         # why is kept here, since it may quote the request or the reply
         logger.warning("The %s %r was not judged: %s", what, id, ex)

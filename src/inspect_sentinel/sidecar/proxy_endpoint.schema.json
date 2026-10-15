@@ -458,6 +458,10 @@
     "-32005": {
       "name": "time_limit",
       "description": "The sentinel didn't finish judging within the sidecar's time limit, and was cancelled. A proxy hook refuses the call, unless its operator has chosen to let calls that weren't judged through."
+    },
+    "-32006": {
+      "name": "unregistered",
+      "description": "The request names a sample that a task registered with the sidecar beforehand doesn't hold, so it is not part of the eval that was registered. A proxy hook refuses the call, unless its operator has chosen to let calls that weren't judged through."
     }
   }
 }

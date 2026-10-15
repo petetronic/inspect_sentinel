@@ -23,6 +23,7 @@ from inspect_sentinel.sidecar._json_rpc import (
     SENTINEL_FAILED,
     TIME_LIMIT,
     UNREADABLE,
+    UNREGISTERED,
 )
 from inspect_sentinel.sidecar._proxy_endpoint import (
     PATH,
@@ -30,6 +31,7 @@ from inspect_sentinel.sidecar._proxy_endpoint import (
     proxy_app,
     schema,
 )
+from inspect_sentinel.sidecar._registration import FileTask
 from tests.sidecar._traffic import (
     JSON,
     message,
@@ -414,10 +416,31 @@ def test_schema_file_is_what_the_models_say() -> None:
     assert _SCHEMA == schema()
 
 
+@pytest.mark.anyio
+async def test_a_sample_not_registered_beforehand_is_not_judged() -> None:
+    task = FileTask.model_validate(
+        {"task": "philadelphia", "samples": [{"sample_id": 7, "sample_input": "Hi."}]}
+    )
+    handler = Handler(weather_rule(), tasks={"philadelphia": task})
+
+    async with _client(handler) as client:
+        answered = await _call(
+            client, "judge_request", _REQUEST | {"headers": _FROM_INSPECT}
+        )
+
+    assert answered["error"]["code"] == UNREGISTERED
+    assert "sample 1" in answered["error"]["message"]
+
+
 def test_schema_file_says_a_call_not_judged_is_refused() -> None:
     errors = _SCHEMA["errors"]
 
-    assert set(errors) == {str(UNREADABLE), str(SENTINEL_FAILED), str(TIME_LIMIT)}
+    assert set(errors) == {
+        str(UNREADABLE),
+        str(SENTINEL_FAILED),
+        str(TIME_LIMIT),
+        str(UNREGISTERED),
+    }
     assert all("refuses the call" in error["description"] for error in errors.values())
 
 

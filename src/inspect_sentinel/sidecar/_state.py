@@ -11,10 +11,11 @@ from inspect_ai.tool import ToolInfo
 from inspect_ai.util import Store
 from pydantic import JsonValue
 
-from .._context import ProxyContext
+from .._context import EvalContext, ProxyContext
 from ._exchange import Refuse
 from ._host import ListRecorder, Record
 from ._inspect_client import Exchange
+from ._registration import TaskFacts
 from ._wire import Offered, Turn
 
 V = TypeVar("V")
@@ -100,6 +101,9 @@ class Run:
     ended_at: dict[str, Refuse] = field(default_factory=dict[str, Refuse])
     """For a run no eval names: the marks of the requests the run was ended at, each with what a request that continues from it is refused with."""
 
+    eval: EvalContext | None = None
+    """The sample the run is, as its task was registered when the run first found it. A registration made later doesn't reach it."""
+
 
 @dataclass(frozen=True)
 class Held:
@@ -162,6 +166,23 @@ class State(Protocol):
         """What was recorded for a request and its reply, or None if nothing is kept for it."""
         ...
 
+    async def register(
+        self, eval_id: str, task: str, facts: TaskFacts, expiry: float
+    ) -> None:
+        """Keep a task an eval registered, in place of any it registered before.
+
+        Args:
+            eval_id: The eval's id.
+            task: The task's name.
+            facts: The task and its samples.
+            expiry: How long to keep it once no request has named it, in seconds.
+        """
+        ...
+
+    async def registration(self, eval_id: str, task: str) -> TaskFacts | None:
+        """A task an eval registered, or None if none is kept. Asking counts as the task being named, so it is kept for its expiry from now."""
+        ...
+
 
 class MemoryState:
     """State kept in this process, and lost when it stops."""
@@ -175,6 +196,9 @@ class MemoryState:
         self._runs = _Expiring[Run](expiry)
         self._held = _Expiring[Held](expiry)
         self._recorders = _Expiring[ListRecorder](expiry)
+        # each registration has an expiry of its own, and there are few, so
+        # they are swept whole
+        self._tasks: dict[tuple[str, str], tuple[float, float, TaskFacts]] = {}
 
     async def run(self, key: str) -> Run:
         run = self._runs.get(key)
@@ -199,6 +223,27 @@ class MemoryState:
     async def records(self, id: str) -> list[Record] | None:
         recorder = self._recorders.get(id)
         return recorder.records if recorder is not None else None
+
+    async def register(
+        self, eval_id: str, task: str, facts: TaskFacts, expiry: float
+    ) -> None:
+        self._expire_tasks()
+        self._tasks[(eval_id, task)] = (time.monotonic(), expiry, facts)
+
+    async def registration(self, eval_id: str, task: str) -> TaskFacts | None:
+        self._expire_tasks()
+        kept = self._tasks.get((eval_id, task))
+        if kept is None:
+            return None
+        _, expiry, facts = kept
+        self._tasks[(eval_id, task)] = (time.monotonic(), expiry, facts)
+        return facts
+
+    def _expire_tasks(self) -> None:
+        now = time.monotonic()
+        for key, (used, expiry, _) in list(self._tasks.items()):
+            if now - used >= expiry:
+                del self._tasks[key]
 
 
 class _Expiring(Generic[V]):

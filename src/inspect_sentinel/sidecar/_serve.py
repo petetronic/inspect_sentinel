@@ -10,6 +10,7 @@ from ._handler import Handler
 from ._host import SidecarHost
 from ._http import HEALTH_PATH, MAX_BODY_BYTES
 from ._proxy_endpoint import proxy_app
+from ._registration import MAX_TASK_EXPIRY, read_tasks_file
 from ._state import RUN_EXPIRY, MemoryState
 
 
@@ -62,6 +63,23 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help="Send an Inspect eval only what it acts on: each step's stage, call and decision, without the explanations, references, metadata and records. A monitor's explanation tells an agent what the monitor looks for, so use this where the eval can't be trusted.",
     )
     parser.add_argument(
+        "--tasks",
+        metavar="FILE",
+        help="A YAML or JSON tasks file: the tasks registered beforehand, which an eval can't replace. A request for a sample of one of them that the file doesn't hold is refused.",
+    )
+    parser.add_argument(
+        "--no-task-registration",
+        action="store_true",
+        help="Take no tasks registered by an eval at task init. Where an eval can't be trusted, tasks are registered beforehand with --tasks instead.",
+    )
+    parser.add_argument(
+        "--task-expiry",
+        type=float,
+        default=MAX_TASK_EXPIRY,
+        metavar="SECONDS",
+        help="The longest a task an eval registered is kept once no request has named it, whatever the eval asks. 30 days by default.",
+    )
+    parser.add_argument(
         "--max-body-bytes",
         type=int,
         default=MAX_BODY_BYTES,
@@ -84,7 +102,7 @@ def handler_from_arguments(arguments: argparse.Namespace) -> Handler:
         arguments: Parsed arguments that `add_arguments` defined.
 
     Raises:
-        ValueError: If a `--model-role` is not `ROLE=MODEL`, or the sentinel configuration is invalid.
+        ValueError: If a `--model-role` is not `ROLE=MODEL`, or the sentinel configuration or the tasks file is invalid.
     """
     roles: dict[str, str] = {}
     for role in arguments.model_role:
@@ -99,6 +117,9 @@ def handler_from_arguments(arguments: argparse.Namespace) -> Handler:
         reject_status=arguments.reject_status,
         time_limit=arguments.time_limit,
         eval_results=not arguments.no_eval_results,
+        tasks=read_tasks_file(arguments.tasks) if arguments.tasks else None,
+        task_registration=not arguments.no_task_registration,
+        task_expiry=arguments.task_expiry,
     )
 
 

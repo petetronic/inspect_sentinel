@@ -4,6 +4,7 @@ import logging
 import threading
 import time
 from dataclasses import replace
+from pathlib import Path
 
 import httpx
 import pytest
@@ -16,6 +17,7 @@ from inspect_sentinel._step import BeforeToolCall
 from inspect_sentinel._types import Protocol
 from inspect_sentinel.sidecar import Handler, Refuse
 from inspect_sentinel.sidecar._proxy_endpoint import proxy_app
+from inspect_sentinel.sidecar._registration import RegistrationError, TaskFacts
 from inspect_sentinel.sidecar._serve import (
     _HealthCheckFilter,
     _quiet_health_checks,
@@ -98,6 +100,9 @@ def test_defaults_are_one_port_and_no_limits() -> None:
     assert arguments.max_body_bytes == 64 * 1024 * 1024
     assert arguments.run_expiry == 24 * 60 * 60
     assert arguments.no_eval_results is False
+    assert arguments.tasks is None
+    assert arguments.no_task_registration is False
+    assert arguments.task_expiry == 30 * 24 * 60 * 60
 
 
 @pytest.mark.anyio
@@ -151,3 +156,43 @@ async def test_an_inspect_client_can_be_sent_only_what_it_acts_on() -> None:
 def test_a_role_is_role_equals_model(role: str) -> None:
     with pytest.raises(ValueError, match="ROLE=MODEL"):
         handler_from_arguments(_arguments("--sentinel", "x", "--model-role", role))
+
+
+@pytest.mark.anyio
+async def test_tasks_registered_beforehand_are_read_from_the_tasks_file(
+    tmp_path: Path,
+) -> None:
+    tasks = tmp_path / "tasks.yaml"
+    tasks.write_text(
+        "tasks:\n  - task: philadelphia\n    samples:\n"
+        "      - sample_id: 1\n        sample_input: Hi.\n"
+    )
+    handler = handler_from_arguments(
+        _arguments(
+            "--sentinel", "no_tokyo", "--tasks", str(tasks), "--task-expiry", "60"
+        )
+    )
+
+    with pytest.raises(RegistrationError, match="beforehand"):
+        await handler.register_task(
+            "eval_789", TaskFacts(task="philadelphia", samples=[])
+        )
+    # a task the file doesn't hold is kept no longer than the limit set
+    assert (
+        await handler.register_task(
+            "eval_789", TaskFacts(task="another", samples=[]), 3600
+        )
+        == 60
+    )
+
+
+@pytest.mark.anyio
+async def test_a_sidecar_can_be_told_to_take_no_registrations() -> None:
+    handler = handler_from_arguments(
+        _arguments("--sentinel", "no_tokyo", "--no-task-registration")
+    )
+
+    with pytest.raises(RegistrationError, match="takes no tasks"):
+        await handler.register_task(
+            "eval_789", TaskFacts(task="philadelphia", samples=[])
+        )

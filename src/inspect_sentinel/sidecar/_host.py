@@ -9,7 +9,7 @@ from inspect_ai.model import ChatMessage, GenerateConfig, ModelOutput, get_model
 from inspect_ai.tool import ToolChoice, ToolInfo
 
 from .._context import Context, EvalContext
-from .._host import HumanAnswer
+from .._host import HostNative, HumanAnswer
 from .._report import Decision, Failed, Report, Reported
 from .._step import AfterGenerate, AfterToolCall, BeforeGenerate, BeforeToolCall, Step
 
@@ -35,7 +35,7 @@ class SidecarHost:
 
     @property
     def eval(self) -> EvalContext | None:
-        """None: nothing tells the sidecar which eval a request is from."""
+        """None: the sidecar's host serves every run, and `RunHost` tells a run's sentinel which sample it is."""
         return None
 
     async def generate(
@@ -96,6 +96,49 @@ class SidecarHost:
         return HumanAnswer(
             decision=decision, reason="No person can be asked from the sidecar yet."
         )
+
+
+class RunHost:
+    """The sidecar's host for one run: the sidecar's own, telling the sentinel which sample the run is."""
+
+    def __init__(self, host: HostNative, eval: EvalContext | None) -> None:
+        """Wrap the sidecar's host for a run.
+
+        Args:
+            host: The sidecar's host, which calls models and would ask a person.
+            eval: The sample the run is, where its task was registered.
+        """
+        self._host = host
+        self._eval = eval
+
+    @property
+    def eval(self) -> EvalContext | None:
+        """The sample the run is, or None if its task wasn't registered."""
+        return self._eval
+
+    async def generate(
+        self,
+        input: str | list[ChatMessage],
+        *,
+        model: str | None = None,
+        role: str | None = None,
+        tools: list[ToolInfo] | None = None,
+        tool_choice: ToolChoice | None = None,
+        config: GenerateConfig | None = None,
+    ) -> ModelOutput:
+        """As the sidecar's host generates."""
+        return await self._host.generate(
+            input,
+            model=model,
+            role=role,
+            tools=tools,
+            tool_choice=tool_choice,
+            config=config,
+        )
+
+    async def ask_human(self, step: Step, choices: Sequence[str]) -> HumanAnswer:
+        """As the sidecar's host asks."""
+        return await self._host.ask_human(step, choices)
 
 
 def stage(step: Step) -> Stage:
