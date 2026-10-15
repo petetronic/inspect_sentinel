@@ -12,7 +12,7 @@ from inspect_ai.model import (
     ChatMessageAssistant,
     ChatMessageTool,
 )
-from inspect_ai.tool import ToolCall
+from inspect_ai.tool import ToolCall, ToolCallView
 from pydantic import JsonValue
 
 from .._context import EvalContext, InspectSample, ProxyContext
@@ -345,6 +345,14 @@ class Handler:
         await self._state.register(eval_id, facts.task, facts, granted)
         return granted
 
+    def _view(self, call: ToolCall, run: Run) -> ToolCallView:
+        # A request names a tool only by the name the model sees. A task
+        # registered beforehand can name the tool that is; otherwise the name
+        # is taken for inspect_ai's own tool of that name, if there is one.
+        task = self._tasks.get(run.eval.task) if run.eval is not None else None
+        tool = task.tools.get(call.function) if task is not None else None
+        return tool_call_view(call, tool or f"inspect_ai/{call.function}")
+
     async def _eval(self, sample: InspectSample) -> EvalContext | None:
         # the sample a request names, from the task's registration; asking
         # counts as the task being named, so its registration is kept
@@ -533,7 +541,7 @@ class Handler:
                 # left empty: only what the model is sent crosses the wire, and
                 # a monitor must not take that for everything the tool returned
                 output="",
-                view=tool_call_view(call),
+                view=self._view(call, run),
                 input=sent.input if sent is not None else None,
                 history=None,
                 tools=sent.tools if sent is not None else None,
@@ -615,7 +623,7 @@ class Handler:
                 conversation=held.conversation,
                 message=message.text,
                 call=call,
-                view=tool_call_view(call),
+                view=self._view(call, run),
                 input=held.input,
                 history=None,
                 tools=held.offered.tools,

@@ -5,6 +5,7 @@ Every import of a private inspect_ai module in the sidecar is here and nowhere e
 
 from __future__ import annotations
 
+import functools
 import importlib
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
@@ -13,7 +14,14 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from inspect_ai.model import ChatMessage, GenerateConfig
-from inspect_ai.tool import Tool, ToolCall, ToolCallView, ToolChoice, ToolInfo
+from inspect_ai.tool import (
+    Tool,
+    ToolCall,
+    ToolCallView,
+    ToolCallViewer,
+    ToolChoice,
+    ToolInfo,
+)
 from pydantic import JsonValue
 
 from ._wire import UnreadableError
@@ -24,14 +32,46 @@ from ._wire import UnreadableError
 _EVERY_PROVIDER: dict[str, Any] = {}
 
 
-def tool_call_view(call: ToolCall) -> ToolCallView:
-    """The view Inspect makes of a call to a tool with no viewer of its own.
+def tool_call_view(call: ToolCall, tool: str | None = None) -> ToolCallView:
+    """The view Inspect makes of a call: the tool's own, or the default view.
 
-    Asked of inspect_ai: a public way to make the default view of a tool call.
+    Asked of inspect_ai: a public way to make the default view of a tool call, and to find a registered tool's viewer.
+
+    Args:
+        call: The call.
+        tool: The registry name of the tool called, where it is known, e.g. `inspect_ai/bash`. Its viewer makes the view, if it has one.
     """
     from inspect_ai.tool._tool_call import default_tool_call_viewer
 
+    viewer = _viewer(tool) if tool is not None else None
+    if viewer is not None:
+        try:
+            return viewer(call)
+        except Exception:
+            # a viewer written for another tool's arguments
+            pass
     return default_tool_call_viewer(call)
+
+
+@functools.cache
+def _viewer(tool: str) -> ToolCallViewer | None:
+    # A tool's viewer is attached when its factory is called, so the tool is
+    # made once, with no arguments. One that needs some has the default view.
+    from inspect_ai._util.registry import (  # pyright: ignore[reportMissingTypeStubs]
+        registry_info,
+        registry_lookup,
+    )
+    from inspect_ai.tool._tool import TOOL_VIEWER
+
+    factory = registry_lookup("tool", tool)
+    if not callable(factory):
+        return None
+    try:
+        made = factory()
+    except Exception:
+        return None
+    viewer = registry_info(made).metadata.get(TOOL_VIEWER)
+    return cast(ToolCallViewer, viewer) if callable(viewer) else None
 
 
 # where inspect_ai's providers note what a message can't hold: each module

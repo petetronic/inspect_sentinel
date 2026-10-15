@@ -1,8 +1,11 @@
 """What a sentinel in the sidecar is given at each step, found in the traffic."""
 
+from dataclasses import replace
 from typing import Any, cast
 
 import pytest
+from inspect_ai._util.registry import registry_info
+from inspect_ai.tool import Tool, ToolCall, ToolCallContent, ToolCallView, tool
 
 from inspect_sentinel._context import Context
 from inspect_sentinel._decorators import protocol
@@ -22,7 +25,15 @@ from inspect_sentinel.sidecar import (
     Refuse,
     UnreadableError,
 )
-from tests.sidecar._traffic import message, ran, reply, request, weather
+from inspect_sentinel.sidecar._registration import FileTask
+from tests.sidecar._traffic import (
+    inspect_headers,
+    message,
+    ran,
+    reply,
+    request,
+    weather,
+)
 
 _TOOLS = [
     {
@@ -281,3 +292,132 @@ async def test_a_tool_the_provider_ran_is_not_judged_as_a_call() -> None:
     records = await handler.records("x")
     assert records is not None
     assert [record.stage for record in records] == ["model_input", "model_output"]
+
+
+def _call(name: str, arguments: dict[str, Any]) -> bytes:
+    return message(
+        {"type": "tool_use", "id": "toolu_1", "name": name, "input": arguments}
+    )
+
+
+@tool(
+    viewer=lambda call: ToolCallView(
+        call=ToolCallContent(format="text", content=f"run {call.arguments['cmd']}")
+    )
+)
+def shell_of_its_own() -> Tool:
+    async def execute(cmd: str) -> str:
+        """Run a command.
+
+        Args:
+            cmd: The command.
+        """
+        return cmd
+
+    return execute
+
+
+@tool(
+    viewer=lambda call: ToolCallView(
+        call=ToolCallContent(format="text", content=call.arguments["missing"])
+    )
+)
+def breaks_its_viewer() -> Tool:
+    async def execute(cmd: str) -> str:
+        """Run a command.
+
+        Args:
+            cmd: The command.
+        """
+        return cmd
+
+    return execute
+
+
+@tool
+def needs_arguments(root: str) -> Tool:
+    async def execute(cmd: str) -> str:
+        """Run a command.
+
+        Args:
+            cmd: The command.
+        """
+        return root + cmd
+
+    return execute
+
+
+def _registered(made: Tool) -> str:
+    return registry_info(made).name
+
+
+async def _view(
+    handler: Handler,
+    name: str,
+    arguments: dict[str, Any] | None = None,
+    **sample: Any,
+) -> str:
+    await handler.request(
+        replace(request(), headers=inspect_headers(**sample)) if sample else request()
+    )
+    await handler.reply(reply(_call(name, arguments or {"cmd": "ls -la"})))
+    (explanation,) = _explanations(await handler.records("x"))
+    return explanation
+
+
+@pytest.mark.anyio
+async def test_a_call_to_one_of_inspect_ais_tools_is_given_its_view() -> None:
+    view = await _view(Handler(reports_views()), "bash", {"command": "ls -la"})
+
+    assert view == "```bash\nls -la\n```\n"
+
+
+@pytest.mark.anyio
+async def test_a_call_to_another_tool_is_given_the_default_view() -> None:
+    view = await _view(Handler(reports_views()), "run_shell")
+
+    assert "run_shell" in view and "ls -la" in view
+
+
+def _task(tools: dict[str, str]) -> dict[str, FileTask]:
+    return {
+        "philadelphia": FileTask.model_validate(
+            {
+                "task": "philadelphia",
+                "samples": [{"sample_id": 1, "sample_input": "Hi."}],
+                "tools": tools,
+            }
+        )
+    }
+
+
+@pytest.mark.anyio
+async def test_a_task_registered_beforehand_names_the_tool_its_calls_are_to() -> None:
+    # the task's own `bash`, not inspect_ai's
+    tools = {"bash": _registered(shell_of_its_own())}
+    handler = Handler(reports_views(), tasks=_task(tools))
+
+    view = await _view(handler, "bash", sample_uuid="run")
+
+    assert view == "run ls -la"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "tool",
+    [breaks_its_viewer, needs_arguments],
+    ids=["a viewer that fails", "a tool that can't be made without arguments"],
+)
+async def test_a_view_that_cant_be_made_is_the_default(tool: Any) -> None:
+    from inspect_sentinel.sidecar._inspect_ai import tool_call_view
+
+    name = registry_info(tool).name
+    handler = Handler(reports_views(), tasks=_task({"bash": name}))
+
+    view = await _view(handler, "bash", sample_uuid="run")
+
+    default = tool_call_view(
+        ToolCall(id="toolu_1", function="bash", arguments={"cmd": "ls -la"})
+    )
+    assert default.call is not None
+    assert view == default.call.content
