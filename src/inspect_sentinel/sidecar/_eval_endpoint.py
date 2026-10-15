@@ -13,7 +13,7 @@ from starlette.routing import Route
 
 from ._handler import Handler, RequestResult
 from ._http import read_within
-from ._inspect_client import record_json
+from ._inspect_client import WithheldTurn, record_json, withheld_turn
 from ._json_rpc import (
     METHOD_NOT_FOUND,
     REGISTRATION_REFUSED,
@@ -90,6 +90,10 @@ class RequestResultResult(BaseModel):
     recorded: list[dict[str, Any]] | None = Field(
         default=None,
         description="What each monitor and protocol recorded, every attempt's in order.",
+    )
+    withheld: WithheldTurn | None = Field(
+        default=None,
+        description="The model's turn, when the latest attempt was refused it because a call in it was rejected, as the `sentinel` field holds it. An eval puts it into its own copy of the conversation, as it would from the field.",
     )
 
 
@@ -237,6 +241,9 @@ async def _answer(handler: Handler, method: str, params: dict[str, Any]) -> Base
             outcome=latest.outcome,
             message=latest.message,
             recorded=[record_json(record) for record in found.records],
+            withheld=(
+                withheld_turn(latest.withheld) if latest.withheld is not None else None
+            ),
         )
     if isinstance(given, RunResultParams):
         run = await handler.run_result(given.run)

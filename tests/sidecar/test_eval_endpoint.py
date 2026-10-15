@@ -3,6 +3,7 @@ import json
 from dataclasses import replace
 from typing import Any
 
+import anyio
 import httpx
 import jsonschema
 import pytest
@@ -12,8 +13,8 @@ from starlette.applications import Starlette
 from inspect_sentinel._context import Context
 from inspect_sentinel._decorators import protocol
 from inspect_sentinel._report import Decision
-from inspect_sentinel._step import BeforeToolCall
-from inspect_sentinel._types import Protocol
+from inspect_sentinel._step import BeforeGenerate, BeforeToolCall
+from inspect_sentinel._types import Protocol, ProtocolGroup
 from inspect_sentinel.sidecar import Handler, Refuse, Request, UnreadableError, _state
 from inspect_sentinel.sidecar._eval_endpoint import (
     INFO_PATH,
@@ -445,3 +446,97 @@ def test_calls_in_these_tests_fit_the_schema_file() -> None:
     assert _fits(methods["register_task"]["params"], _REGISTRATION)
     assert _fits(methods["request_result"]["params"], {"id": "irid-1"})
     assert not _fits(methods["request_result"]["params"], {})
+
+
+@pytest.mark.anyio
+async def test_a_reply_in_flight_when_its_eval_ended_the_run_is_refused() -> None:
+    handler = Handler(counts_lookups())
+    await handler.request(_asked("x"))
+    await handler.end_run("sample_123")
+
+    answer = await handler.reply(reply(_message("Oslo")))
+
+    assert isinstance(answer, Refuse)
+    assert answer.sentinel is not None
+    assert answer.sentinel["outcome"] == "terminate"
+    # the run is not made again
+    assert await handler.run_result("sample_123") is None
+    result = await _request_result(handler)
+    assert (result["state"], result["outcome"]) == ("decided", "terminate")
+
+
+# made in each test, as an event belongs to the event loop it is made in:
+# one that lets the request be judged, one that lets the reply be, and one
+# set once the reply's judging has begun
+_gates: list[anyio.Event] = []
+
+
+@protocol
+def waits_to_be_told() -> ProtocolGroup:
+    async def before(context: Context, step: BeforeGenerate) -> Decision | None:
+        await _gates[0].wait()
+        return Decision.proceed()
+
+    async def call(context: Context, step: BeforeToolCall) -> Decision | None:
+        _gates[2].set()
+        await _gates[1].wait()
+        return Decision.proceed()
+
+    return ProtocolGroup(before, call)
+
+
+@pytest.mark.anyio
+async def test_a_request_judged_while_its_eval_ended_the_run_is_refused() -> None:
+    _gates[:] = [anyio.Event(), anyio.Event(), anyio.Event()]
+    handler = Handler(waits_to_be_told())
+    answers: list[Any] = []
+
+    async def ask() -> None:
+        answers.append(await handler.request(_asked("x")))
+
+    async with anyio.create_task_group() as group:
+        group.start_soon(ask)
+        await anyio.wait_all_tasks_blocked()
+        await handler.end_run("sample_123")
+        _gates[0].set()
+
+    (answer,) = answers
+    assert isinstance(answer, Refuse)
+    assert await handler.run_result("sample_123") is None
+
+
+@pytest.mark.anyio
+async def test_a_reply_being_judged_is_judging() -> None:
+    _gates[:] = [anyio.Event(), anyio.Event(), anyio.Event()]
+    handler = Handler(waits_to_be_told())
+    states: list[str] = []
+
+    async def ask() -> None:
+        await handler.request(_asked("x"))
+        await handler.reply(reply(_message("Oslo")))
+
+    async with anyio.create_task_group() as group:
+        group.start_soon(ask)
+        await anyio.wait_all_tasks_blocked()
+        states.append((await _request_result(handler))["state"])
+        _gates[0].set()
+        await _gates[2].wait()
+        states.append((await _request_result(handler))["state"])
+        _gates[1].set()
+
+    states.append((await _request_result(handler))["state"])
+    # judging the request, then judging the reply, then decided
+    assert states == ["judging", "judging", "decided"]
+
+
+@pytest.mark.anyio
+async def test_a_rejected_turn_is_given_back_by_request_result() -> None:
+    handler = Handler(weather_rule("reject", "Tokyo"))
+    await handler.request(_asked("x"))
+    await handler.reply(reply(_message("Tokyo")))
+
+    result = await _request_result(handler)
+
+    withheld = result["withheld"]
+    assert withheld["message"]["role"] == "assistant"
+    assert withheld["results"] == {"toolu_1": "Tokyo is not allowed."}

@@ -189,16 +189,17 @@ def sentinel_field(
         outcome=outcome,
         trimmed=True if trimmed else None,
         steps=steps,
-        withheld=(
-            WithheldTurn(
-                message=withheld.message.model_dump(mode="json", exclude_none=True),
-                results=dict(withheld.told),
-            )
-            if withheld is not None
-            else None
-        ),
+        withheld=withheld_turn(withheld) if withheld is not None else None,
     )
     return written.model_dump(mode="json", exclude_none=True)
+
+
+def withheld_turn(withheld: Withheld) -> WithheldTurn:
+    """A turn the client was refused, as the `sentinel` field and the endpoint for evals write it."""
+    return WithheldTurn(
+        message=withheld.message.model_dump(mode="json", exclude_none=True),
+        results=dict(withheld.told),
+    )
 
 
 def with_sentinel(content_type: str, body: bytes, field: Mapping[str, Any]) -> bytes:

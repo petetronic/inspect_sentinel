@@ -14,7 +14,7 @@ from pydantic import JsonValue
 from .._context import EvalContext, ProxyContext
 from ._exchange import Refuse
 from ._host import ListRecorder, Record
-from ._inspect_client import Exchange
+from ._inspect_client import Exchange, Withheld
 from ._registration import TaskFacts
 from ._wire import Offered, Turn
 
@@ -56,6 +56,9 @@ class Attempt:
 
     message: str | None = None
     """What the model is told, for a rejection."""
+
+    withheld: Withheld | None = None
+    """The model's turn, when the client was refused it because a call in it was rejected."""
 
     def decide(self, outcome: Outcome, message: str | None = None) -> None:
         """Mark the attempt decided."""
@@ -188,7 +191,7 @@ class State(Protocol):
     """
 
     async def run(self, key: str) -> Run:
-        """The run's state, made new if none is kept."""
+        """The run's state, made new if none is kept. A run its eval ended is not made again: an ended run is handed back, whose `refusal` refuses every request of it."""
         ...
 
     async def hold(self, id: str, held: Held) -> None:
@@ -229,15 +232,11 @@ class State(Protocol):
         ...
 
     async def end_run(self, key: str) -> bool:
-        """Drop a run's state, and remember that it ended.
+        """Drop a run's state, and remember that it ended. A request or reply of the run still being judged finds it ended too.
 
         Returns:
             Whether the run was known: kept, or ended before.
         """
-        ...
-
-    async def ended(self, key: str) -> bool:
-        """Whether the run was ended by its eval, and is remembered as ended."""
         ...
 
     async def attempt(self, request: str, exchange: str) -> Attempt:
@@ -266,7 +265,8 @@ class MemoryState:
         self._runs = _Expiring[Run](expiry)
         self._held = _Expiring[Held](expiry)
         self._recorders = _Expiring[ListRecorder](expiry)
-        self._ended = _Expiring[bool](expiry)
+        # what is left of a run its eval ended: only that it ended
+        self._ended = _Expiring[Run](expiry)
         # a request's id outlives its attempts, so the eval can be told they
         # were dropped and not that the request was never seen
         self._dropped = _Expiring[bool](expiry, limit=DROPPED_IDS)
@@ -279,9 +279,13 @@ class MemoryState:
 
     async def run(self, key: str) -> Run:
         run = self._runs.get(key)
-        if run is None:
-            run = Run()
-            self._runs.put(key, run)
+        if run is not None:
+            return run
+        ended = self._ended.get(key)
+        if ended is not None:
+            return ended
+        run = Run()
+        self._runs.put(key, run)
         return run
 
     async def hold(self, id: str, held: Held) -> None:
@@ -320,12 +324,17 @@ class MemoryState:
         return self._runs.get(key)
 
     async def end_run(self, key: str) -> bool:
-        known = self._runs.pop(key) is not None or self._ended.get(key) is not None
-        self._ended.put(key, True)
-        return known
-
-    async def ended(self, key: str) -> bool:
-        return self._ended.get(key) is not None
+        run = self._runs.pop(key)
+        before = self._ended.get(key)
+        refusal = Refuse(400, "This run has ended.")
+        if run is not None and run.refusal is None:
+            # held by any request or reply of the run still being judged
+            run.refusal = refusal
+        if before is None:
+            self._ended.put(
+                key, Run(refusal=run.refusal if run is not None else refusal)
+            )
+        return run is not None or before is not None
 
     async def attempt(self, request: str, exchange: str) -> Attempt:
         attempts = self._attempts.get(request)

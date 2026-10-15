@@ -225,6 +225,8 @@ class Handler:
         """
         held = await self._state.release(reply.id)
         attempt = held.attempt if held is not None else None
+        if attempt is not None:
+            attempt.state = "judging"
         try:
             answer = await self._within_limit(
                 self._reply(reply, held), "reply", reply.id
@@ -241,8 +243,10 @@ class Handler:
             attempt.decide("proceed")
         elif _ended(await self._state.run(held.run), held.marks) is not None:
             attempt.decide("terminate")
+            attempt.withheld = held.exchange.withheld
         else:
             attempt.decide("reject", held.exchange.message)
+            attempt.withheld = held.exchange.withheld
         return answer
 
     async def request_result(
@@ -384,26 +388,22 @@ class Handler:
         key = sample.sample_uuid if sample is not None else opening
         # a conversation is told apart within a named run by how it opens
         conversation_key = f"{key}/{opening}" if named else key
-        if named and await self._state.ended(key):
-            # the eval ended the run once it had scored the sample
-            refusal = Refuse(400, "This run has ended.")
-            return self._with_field(refusal, proxy, Exchange(), Run(refusal=refusal))
         run = await self._state.run(key)
-        conversation = run.conversations.setdefault(conversation_key, Conversation())
-        messages = await read_request(
-            request.provider, request.body, request.format, start=conversation.noted
-        )
-        sends = offered(request.provider, request.body, request.format)
         marks = request_marks(request.provider, request.body, request.format)
+        refusal = _ended(run, marks)
+        if refusal is not None:
+            # the run has ended, and the sentinel is not asked again
+            return self._with_field(refusal, proxy, Exchange(), run)
         if sample is not None:
             found = await self._eval(sample)
             if run.eval is None:
                 # a run keeps the facts it first found
                 run.eval = found
-        refusal = _ended(run, marks)
-        if refusal is not None:
-            # the run has ended, and the sentinel is not asked again
-            return self._with_field(refusal, proxy, Exchange(), run)
+        conversation = run.conversations.setdefault(conversation_key, Conversation())
+        messages = await read_request(
+            request.provider, request.body, request.format, start=conversation.noted
+        )
+        sends = offered(request.provider, request.body, request.format)
 
         answer: Answer = Pass()
         # only what the client sent holds results to judge: what the sidecar
