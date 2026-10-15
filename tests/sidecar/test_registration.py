@@ -18,6 +18,7 @@ from inspect_sentinel.sidecar._registration import (
     TaskFacts,
     UnregisteredSampleError,
     read_tasks_file,
+    read_tasks_folder,
 )
 from inspect_sentinel.sidecar._state import MemoryState
 from tests.sidecar._traffic import SAMPLE, inspect_headers, request
@@ -332,3 +333,30 @@ def test_a_tasks_file_that_cant_be_read(tmp_path: Path, text: str, says: str) ->
 
     with pytest.raises(ValueError, match=says):
         read_tasks_file(path)
+
+
+def test_a_tasks_folder_holds_every_tasks_file_in_it(tmp_path: Path) -> None:
+    (tmp_path / "weather.yaml").write_text(_YAML)
+    (tmp_path / "travel.json").write_text(
+        json.dumps({"tasks": [{"task": "itinerary", "samples": []}]})
+    )
+    (tmp_path / "README.md").write_text("Not a tasks file.")
+    (tmp_path / "nested").mkdir()
+    (tmp_path / "nested" / "ignored.yaml").write_text("not: a tasks file")
+
+    tasks = read_tasks_folder(tmp_path)
+
+    assert sorted(tasks) == ["itinerary", "philadelphia"]
+
+
+def test_a_task_named_in_two_files_is_an_error(tmp_path: Path) -> None:
+    (tmp_path / "a.yaml").write_text(_YAML)
+    (tmp_path / "b.yml").write_text(_YAML)
+
+    with pytest.raises(ValueError, match="named in a.yaml too"):
+        read_tasks_folder(tmp_path)
+
+
+def test_a_tasks_folder_that_isnt_one_is_an_error(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="not a folder"):
+        read_tasks_folder(tmp_path / "missing")

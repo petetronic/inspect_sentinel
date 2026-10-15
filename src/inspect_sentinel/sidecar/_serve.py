@@ -20,7 +20,7 @@ from ._handler import Handler
 from ._host import SidecarHost
 from ._http import HEALTH_PATH, MAX_BODY_BYTES, health_route
 from ._proxy_endpoint import proxy_app
-from ._registration import MAX_TASK_EXPIRY, read_tasks_file
+from ._registration import MAX_TASK_EXPIRY, read_tasks_folder
 from ._state import RUN_EXPIRY, MemoryState
 
 
@@ -33,7 +33,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--sentinel",
         required=True,
-        help="A YAML or JSON sentinel configuration file, or the registered name of a monitor or protocol. Beside `sentinel`, the file may hold a `sidecar` stanza with the sidecar's own settings, which the options given here override.",
+        help="A YAML or JSON configuration file, or the registered name of a monitor or protocol. Beside `sentinel`, the file may hold a `server` stanza with the server's own settings, which the options given here override, and a `tasks_folder`.",
     )
     parser.add_argument(
         "--model-role",
@@ -80,14 +80,14 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help="Send an Inspect eval only what it acts on: each step's stage, call and decision, without the explanations, references, metadata and records. A monitor's explanation tells an agent what the monitor looks for, so use this where the eval can't be trusted.",
     )
     parser.add_argument(
-        "--tasks",
-        metavar="FILE",
-        help="A YAML or JSON tasks file: the tasks registered beforehand, which an eval can't replace. A request for a sample of one of them that the file doesn't hold is refused.",
+        "--tasks-folder",
+        metavar="FOLDER",
+        help="A folder of YAML or JSON tasks files, each with a `tasks` list: the tasks registered beforehand, which an eval can't replace. A request for a sample of one of them that its file doesn't hold is refused.",
     )
     parser.add_argument(
         "--no-runtime-task-registration",
         action="store_true",
-        help="Take no tasks registered by an eval at task init. Where an eval can't be trusted, tasks are registered beforehand with --tasks instead.",
+        help="Take no tasks registered by an eval at task init. Where an eval can't be trusted, tasks are registered beforehand with --tasks-folder instead.",
     )
     parser.add_argument(
         "--task-expiry",
@@ -112,10 +112,10 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
-class SidecarSettings(BaseModel):
-    """The `sidecar` stanza of a sentinel configuration file: the sidecar's own settings, beside the sentinel's.
+class ServerSettings(BaseModel):
+    """The `server` stanza of a configuration file: the server's own settings, beside the sentinel.
 
-    Each key is one of the sidecar's command-line options, with underscores, and a `--no-` option is the setting turned off. Model roles are `model_roles`, as inspect_ai names them.
+    Each key is one of the command-line options, with underscores, and a `--no-` option is the setting turned off. Model roles are `model_roles`, as inspect_ai names them.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -127,7 +127,6 @@ class SidecarSettings(BaseModel):
     reject_status: int | None = None
     time_limit: float | None = None
     eval_results: bool | None = None
-    tasks: str | None = None
     runtime_task_registration: bool | None = None
     task_expiry: float | None = None
     max_body_bytes: int | None = None
@@ -148,8 +147,6 @@ _OPTIONS: dict[str, tuple[str, str, Callable[[Any, Path], Any]]] = {
         "no_runtime_task_registration",
         lambda on, _: not on,
     ),
-    # a file the stanza names is found beside the configuration file
-    "tasks": ("--tasks", "tasks", lambda tasks, base: str(base / tasks)),
     **{
         name: (f"--{name.replace('_', '-')}", name, lambda value, _: value)
         for name in (
@@ -167,9 +164,9 @@ _OPTIONS: dict[str, tuple[str, str, Callable[[Any, Path], Any]]] = {
 
 
 def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    """Parse the sidecar's command line, with the settings of the configuration file's `sidecar` stanza under it.
+    """Parse the command line, with the configuration file's `server` stanza and `tasks_folder` under it.
 
-    An option given on the command line wins over the stanza, and the stanza wins over the option's default.
+    An option given on the command line wins over the file, and the file wins over the option's default. The tasks folder is found beside the file.
 
     Args:
         argv: The arguments, without the program's name. The process's own if not given.
@@ -186,51 +183,64 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     add_arguments(parser)
     arguments = parser.parse_args(given)
-    sentinel, settings = read_configuration(arguments.sentinel)
+    sentinel, settings, tasks_folder = read_configuration(arguments.sentinel)
     arguments.sentinel_config = sentinel
-    if settings is None:
-        return arguments
+
+    def overridden(option: str) -> bool:
+        return any(arg == option or arg.startswith(f"{option}=") for arg in given)
+
     base = Path(arguments.sentinel).resolve().parent
-    for name, value in settings.model_dump(exclude_none=True).items():
-        option, dest, convert = _OPTIONS[name]
-        if not any(arg == option or arg.startswith(f"{option}=") for arg in given):
-            setattr(arguments, dest, convert(value, base))
+    if tasks_folder is not None and not overridden("--tasks-folder"):
+        arguments.tasks_folder = str(base / tasks_folder)
+    if settings is not None:
+        for name, value in settings.model_dump(exclude_none=True).items():
+            option, dest, convert = _OPTIONS[name]
+            if not overridden(option):
+                setattr(arguments, dest, convert(value, base))
     return arguments
 
 
-def read_configuration(config: str) -> tuple[Any, SidecarSettings | None]:
-    """Read a sentinel configuration, and its `sidecar` stanza if it has one.
+def read_configuration(config: str) -> tuple[Any, ServerSettings | None, str | None]:
+    """Read a configuration file: the sentinel, the `server` stanza and the `tasks_folder`.
 
     Args:
-        config: A YAML or JSON sentinel configuration file, or the registered name of a monitor or protocol.
+        config: A YAML or JSON configuration file, or the registered name of a monitor or protocol.
 
     Returns:
-        What to build the sentinel from, which is `config` itself unless the file has a stanza, and the stanza's settings, or None.
+        What to build the sentinel from, which is `config` itself unless the file holds more than a sentinel; the `server` stanza's settings, or None; and the tasks folder as the file names it, or None.
 
     Raises:
-        ValueError: If the file has keys other than `sentinel` and `sidecar`, or its stanza holds a setting the sidecar doesn't have.
+        ValueError: If the file has keys other than `sentinel`, `server` and `tasks_folder`, or its stanza holds a setting the server doesn't have.
     """
     path = Path(config)
     if not path.is_file():
         # a registered name, which the core loader finds
-        return config, None
+        return config, None, None
     try:
         content: object = yaml.safe_load(path.read_text())
     except yaml.YAMLError as ex:
         raise ValueError(f"{config}: could not parse the file: {ex}") from None
-    if not isinstance(content, dict) or "sidecar" not in content:
-        # the core loader reads a file without a stanza, as an eval does
-        return config, None
+    if not isinstance(content, dict) or set(cast("dict[str, Any]", content)) == {
+        "sentinel"
+    }:
+        # the core loader reads a file of only a sentinel, as an eval does
+        return config, None, None
     content = cast("dict[str, Any]", content)
-    if set(content) != {"sentinel", "sidecar"}:
+    if "sentinel" not in content or not set(content) <= _KEYS:
         raise ValueError(
-            f"{config}: a sentinel configuration file with a sidecar stanza holds only `sentinel` and `sidecar`."
+            f"{config}: a configuration file holds `sentinel`, and may hold `server` and `tasks_folder`, and nothing else."
         )
     try:
-        settings = SidecarSettings.model_validate(content["sidecar"] or {})
+        settings = ServerSettings.model_validate(content.get("server") or {})
     except ValidationError as ex:
-        raise ValueError(f"{config}: the sidecar stanza doesn't fit: {ex}") from None
-    return content["sentinel"], settings
+        raise ValueError(f"{config}: the server stanza doesn't fit: {ex}") from None
+    folder = content.get("tasks_folder")
+    if folder is not None and not isinstance(folder, str):
+        raise ValueError(f"{config}: `tasks_folder` is a folder's path.")
+    return content["sentinel"], settings, folder
+
+
+_KEYS = frozenset({"sentinel", "server", "tasks_folder"})
 
 
 def handler_from_arguments(arguments: argparse.Namespace) -> Handler:
@@ -240,7 +250,7 @@ def handler_from_arguments(arguments: argparse.Namespace) -> Handler:
         arguments: Parsed arguments that `add_arguments` defined.
 
     Raises:
-        ValueError: If a `--model-role` is not `ROLE=MODEL`, or the sentinel configuration or the tasks file is invalid.
+        ValueError: If a `--model-role` is not `ROLE=MODEL`, or the sentinel configuration or a tasks file is invalid.
     """
     roles: dict[str, str] = {}
     for role in arguments.model_role:
@@ -255,7 +265,9 @@ def handler_from_arguments(arguments: argparse.Namespace) -> Handler:
         reject_status=arguments.reject_status,
         time_limit=arguments.time_limit,
         eval_results=not arguments.no_eval_results,
-        tasks=read_tasks_file(arguments.tasks) if arguments.tasks else None,
+        tasks=read_tasks_folder(arguments.tasks_folder)
+        if arguments.tasks_folder
+        else None,
         runtime_task_registration=not arguments.no_runtime_task_registration,
         task_expiry=arguments.task_expiry,
     )

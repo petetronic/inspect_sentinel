@@ -72,7 +72,7 @@ class TaskFacts(BaseModel):
 
 
 class FileTask(TaskFacts):
-    """A task registered beforehand, in a tasks file."""
+    """A task registered beforehand, in a tasks file in the tasks folder."""
 
     tools: dict[str, str] = Field(
         default_factory=dict[str, str],
@@ -81,9 +81,42 @@ class FileTask(TaskFacts):
 
 
 class TasksFile(BaseModel):
-    """A tasks file: the tasks registered with the sidecar beforehand."""
+    """A tasks file: tasks registered with the server beforehand. The tasks folder holds any number of them."""
 
     tasks: list[FileTask] = Field(description="The tasks, each named once.")
+
+
+def read_tasks_folder(folder: str | Path) -> dict[str, FileTask]:
+    """Read every tasks file in a folder: each YAML or JSON file directly in it.
+
+    Args:
+        folder: The folder.
+
+    Returns:
+        The tasks of every file, by name.
+
+    Raises:
+        ValueError: If the folder isn't one, a file in it can't be read as a tasks file, or a task is named twice, in one file or in two.
+    """
+    path = Path(folder)
+    if not path.is_dir():
+        raise ValueError(f"{folder}: not a folder of tasks files.")
+    tasks: dict[str, FileTask] = {}
+    found: dict[str, Path] = {}
+    for file in sorted(path.iterdir()):
+        if not file.is_file() or file.suffix not in _TASKS_FILES:
+            continue
+        for name, task in read_tasks_file(file).items():
+            if name in tasks:
+                raise ValueError(
+                    f"{file}: the task {name!r} is named in {found[name].name} too. A request names only a task's name, so two tasks can't share one."
+                )
+            tasks[name] = task
+            found[name] = file
+    return tasks
+
+
+_TASKS_FILES = frozenset({".yaml", ".yml", ".json"})
 
 
 def read_tasks_file(path: str | Path) -> dict[str, FileTask]:

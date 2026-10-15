@@ -101,7 +101,7 @@ def test_defaults_are_one_port_and_no_limits() -> None:
     assert arguments.max_body_bytes == 64 * 1024 * 1024
     assert arguments.run_expiry == 24 * 60 * 60
     assert arguments.no_eval_results is False
-    assert arguments.tasks is None
+    assert arguments.tasks_folder is None
     assert arguments.no_runtime_task_registration is False
     assert arguments.task_expiry == 30 * 24 * 60 * 60
 
@@ -160,17 +160,21 @@ def test_a_role_is_role_equals_model(role: str) -> None:
 
 
 @pytest.mark.anyio
-async def test_tasks_registered_beforehand_are_read_from_the_tasks_file(
+async def test_tasks_registered_beforehand_are_read_from_the_tasks_folder(
     tmp_path: Path,
 ) -> None:
-    tasks = tmp_path / "tasks.yaml"
-    tasks.write_text(
+    (tmp_path / "weather.yaml").write_text(
         "tasks:\n  - task: philadelphia\n    samples:\n"
         "      - sample_id: 1\n        sample_input: Hi.\n"
     )
     handler = handler_from_arguments(
         _arguments(
-            "--sentinel", "no_tokyo", "--tasks", str(tasks), "--task-expiry", "60"
+            "--sentinel",
+            "no_tokyo",
+            "--tasks-folder",
+            str(tmp_path),
+            "--task-expiry",
+            "60",
         )
     )
 
@@ -202,19 +206,19 @@ async def test_a_sidecar_can_be_told_to_take_no_registrations() -> None:
 _STANZA = """
 sentinel:
   name: no_tokyo
-sidecar:
+server:
   model_roles:
     monitor: mockllm/model
   port: 9000
   reject_status: 503
   eval_results: false
-  tasks: tasks.yaml
   runtime_task_registration: false
   task_expiry: 60
+tasks_folder: tasks
 """
 
 
-def test_the_sidecar_stanza_sets_what_the_options_would(tmp_path: Path) -> None:
+def test_the_server_stanza_sets_what_the_options_would(tmp_path: Path) -> None:
     config = tmp_path / "sentinel.yaml"
     config.write_text(_STANZA)
 
@@ -227,8 +231,8 @@ def test_the_sidecar_stanza_sets_what_the_options_would(tmp_path: Path) -> None:
         True,
     )
     assert arguments.task_expiry == 60
-    # a file the stanza names is found beside the configuration file
-    assert arguments.tasks == str(tmp_path.resolve() / "tasks.yaml")
+    # the tasks folder is found beside the configuration file
+    assert arguments.tasks_folder == str(tmp_path.resolve() / "tasks")
     # the sentinel is built from the file's sentinel, which the core reads
     assert arguments.sentinel_config == {"name": "no_tokyo"}
 
@@ -244,16 +248,19 @@ def test_an_option_given_wins_over_the_stanza_even_at_its_default(
     config = tmp_path / "sentinel.yaml"
     config.write_text(_STANZA)
 
-    arguments = parse_arguments(["--sentinel", str(config), *given])
+    arguments = parse_arguments(
+        ["--sentinel", str(config), *given, "--tasks-folder", "elsewhere"]
+    )
 
     assert arguments.reject_status == 400
+    assert arguments.tasks_folder == "elsewhere"
     assert arguments.port == 9000
 
 
 @pytest.mark.anyio
 async def test_a_handler_is_built_from_a_file_with_a_stanza(tmp_path: Path) -> None:
     config = tmp_path / "sentinel.yaml"
-    config.write_text("sentinel:\n  name: no_tokyo\nsidecar:\n  reject_status: 503\n")
+    config.write_text("sentinel:\n  name: no_tokyo\nserver:\n  reject_status: 503\n")
     handler = handler_from_arguments(parse_arguments(["--sentinel", str(config)]))
     await handler.request(request())
 
@@ -281,18 +288,20 @@ def test_a_registered_name_is_found_as_an_eval_finds_it() -> None:
 @pytest.mark.parametrize(
     ("text", "says"),
     [
-        ("sentinel:\n  name: no_tokyo\nsidecar:\n  colour: blue\n", "doesn't fit"),
+        ("sentinel:\n  name: no_tokyo\nserver:\n  colour: blue\n", "doesn't fit"),
         (
-            "sentinel:\n  name: no_tokyo\nsidecar: {}\nother: 1\n",
-            "only `sentinel` and `sidecar`",
+            "sentinel:\n  name: no_tokyo\nserver: {}\nother: 1\n",
+            "and nothing else",
         ),
-        ("sidecar:\n  port: 9000\n", "only `sentinel` and `sidecar`"),
+        ("server:\n  port: 9000\n", "and nothing else"),
+        ("sentinel:\n  name: no_tokyo\ntasks_folder: [a]\n", "a folder's path"),
         ("sentinel: [oops\n", "could not parse"),
     ],
     ids=[
-        "a setting the sidecar doesn't have",
+        "a setting the server doesn't have",
         "another key",
         "no sentinel",
+        "a tasks folder that isn't a path",
         "not YAML",
     ],
 )
