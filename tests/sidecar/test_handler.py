@@ -837,7 +837,7 @@ async def test_every_later_request_of_a_sample_that_ended_is_refused() -> None:
     assert [plain(answer) for answer in (ended, again, subagent)] == [_ENDED] * 3
     assert other == Pass()
     # the sentinel was not asked again
-    assert await handler.records("b") is None
+    assert not await handler.records("b")
 
 
 @pytest.mark.anyio

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import time
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Generic, Protocol, TypeVar
+from typing import Generic, Literal, Protocol, TypeAlias, TypeVar
 
 from inspect_ai.model import ChatMessage
 from inspect_ai.tool import ToolInfo
@@ -25,6 +25,45 @@ MADE_KEPT = 64
 
 RUN_EXPIRY = 24 * 60 * 60
 """How long a run's state is kept once no request has named it, in seconds."""
+
+DROPPED_IDS = 1_000_000
+"""How many ids of requests whose records were dropped are kept, so that a request can be told apart from one never seen."""
+
+NotJudged: TypeAlias = Literal[
+    "unreadable", "unregistered", "time_limit", "error", "provider_error"
+]
+"""Why a request or its reply was not judged."""
+
+Outcome: TypeAlias = Literal["proceed", "reject", "terminate"]
+"""What an exchange came to."""
+
+
+@dataclass
+class Attempt:
+    """One attempt at a request an eval names, from the request to its reply."""
+
+    exchange: str
+    """The proxy's id for the exchange, under which its records are kept."""
+
+    state: Literal["judging", "awaiting_reply", "decided", "not_judged"] = "judging"
+    """Where the attempt stands."""
+
+    reason: NotJudged | None = None
+    """Why the attempt was not judged, when it wasn't."""
+
+    outcome: Outcome | None = None
+    """What the attempt came to, once decided."""
+
+    message: str | None = None
+    """What the model is told, for a rejection."""
+
+    def decide(self, outcome: Outcome, message: str | None = None) -> None:
+        """Mark the attempt decided."""
+        self.state, self.outcome, self.message = "decided", outcome, message
+
+    def not_judged(self, reason: NotJudged) -> None:
+        """Mark the attempt as one that judging ended without a decision for."""
+        self.state, self.reason = "not_judged", reason
 
 
 @dataclass
@@ -126,6 +165,8 @@ class Held:
     """The request's marks, for each count of the entries the client sent, before anything was added."""
     proxy: ProxyContext
     """What the proxy said about the request."""
+    attempt: Attempt | None = None
+    """The attempt at the request, for an eval that names its requests."""
     exchange: Exchange = field(default_factory=Exchange)
     """What was decided so far during the exchange, for an Inspect client's `sentinel` field."""
 
@@ -183,6 +224,35 @@ class State(Protocol):
         """A task an eval registered, or None if none is kept. Asking counts as the task being named, so it is kept for its expiry from now."""
         ...
 
+    async def existing_run(self, key: str) -> Run | None:
+        """The run's state, or None if none is kept."""
+        ...
+
+    async def end_run(self, key: str) -> bool:
+        """Drop a run's state, and remember that it ended.
+
+        Returns:
+            Whether the run was known: kept, or ended before.
+        """
+        ...
+
+    async def ended(self, key: str) -> bool:
+        """Whether the run was ended by its eval, and is remembered as ended."""
+        ...
+
+    async def attempt(self, request: str, exchange: str) -> Attempt:
+        """Begin a new attempt at a request an eval names.
+
+        Args:
+            request: The eval's id for the request. A client that retries the request sends it again under the same id.
+            exchange: The proxy's id for this attempt's exchange.
+        """
+        ...
+
+    async def attempts(self, request: str) -> list[Attempt] | Literal["dropped"] | None:
+        """The attempts at a request in order, `dropped` if they were kept and no longer are, or None if the request was never seen."""
+        ...
+
 
 class MemoryState:
     """State kept in this process, and lost when it stops."""
@@ -196,6 +266,13 @@ class MemoryState:
         self._runs = _Expiring[Run](expiry)
         self._held = _Expiring[Held](expiry)
         self._recorders = _Expiring[ListRecorder](expiry)
+        self._ended = _Expiring[bool](expiry)
+        # a request's id outlives its attempts, so the eval can be told they
+        # were dropped and not that the request was never seen
+        self._dropped = _Expiring[bool](expiry, limit=DROPPED_IDS)
+        self._attempts = _Expiring[list[Attempt]](
+            expiry, dropped=lambda key: self._dropped.put(key, True)
+        )
         # each registration has an expiry of its own, and there are few, so
         # they are swept whole
         self._tasks: dict[tuple[str, str], tuple[float, float, TaskFacts]] = {}
@@ -239,6 +316,32 @@ class MemoryState:
         self._tasks[(eval_id, task)] = (time.monotonic(), expiry, facts)
         return facts
 
+    async def existing_run(self, key: str) -> Run | None:
+        return self._runs.get(key)
+
+    async def end_run(self, key: str) -> bool:
+        known = self._runs.pop(key) is not None or self._ended.get(key) is not None
+        self._ended.put(key, True)
+        return known
+
+    async def ended(self, key: str) -> bool:
+        return self._ended.get(key) is not None
+
+    async def attempt(self, request: str, exchange: str) -> Attempt:
+        attempts = self._attempts.get(request)
+        if attempts is None:
+            attempts = list[Attempt]()
+            self._attempts.put(request, attempts)
+        attempt = Attempt(exchange)
+        attempts.append(attempt)
+        return attempt
+
+    async def attempts(self, request: str) -> list[Attempt] | Literal["dropped"] | None:
+        attempts = self._attempts.get(request)
+        if attempts is not None:
+            return attempts
+        return "dropped" if self._dropped.get(request) is not None else None
+
     def _expire_tasks(self) -> None:
         now = time.monotonic()
         for key, (used, expiry, _) in list(self._tasks.items()):
@@ -248,8 +351,16 @@ class MemoryState:
 
 class _Expiring(Generic[V]):
     # oldest use first, so what has expired is always at the front
-    def __init__(self, expiry: float) -> None:
+    def __init__(
+        self,
+        expiry: float,
+        *,
+        limit: int | None = None,
+        dropped: Callable[[str], None] | None = None,
+    ) -> None:
         self._expiry = expiry
+        self._limit = limit
+        self._dropped = dropped
         self._kept: OrderedDict[str, tuple[float, V]] = OrderedDict()
 
     def get(self, key: str) -> V | None:
@@ -266,6 +377,8 @@ class _Expiring(Generic[V]):
         self._expire()
         self._kept[key] = (time.monotonic(), value)
         self._kept.move_to_end(key)
+        if self._limit is not None and len(self._kept) > self._limit:
+            self._kept.popitem(last=False)
 
     def pop(self, key: str) -> V | None:
         self._expire()
@@ -279,3 +392,5 @@ class _Expiring(Generic[V]):
             if now - used < self._expiry:
                 return
             del self._kept[key]
+            if self._dropped is not None:
+                self._dropped(key)

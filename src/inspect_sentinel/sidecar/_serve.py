@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 
+import anyio
 import uvicorn
+from starlette.applications import Starlette
 
 from .._config import sentinel_from_config
+from ._eval_endpoint import TOKEN_VARIABLE, eval_routes
 from ._handler import Handler
 from ._host import SidecarHost
-from ._http import HEALTH_PATH, MAX_BODY_BYTES
+from ._http import HEALTH_PATH, MAX_BODY_BYTES, health_route
 from ._proxy_endpoint import proxy_app
 from ._registration import MAX_TASK_EXPIRY, read_tasks_file
 from ._state import RUN_EXPIRY, MemoryState
@@ -42,6 +46,13 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=8900,
         help="The port to listen on.",
+    )
+    parser.add_argument(
+        "--eval-port",
+        type=int,
+        default=None,
+        metavar="PORT",
+        help=f"Serve the endpoint for evals on a port of its own, with a token of its own read from {TOKEN_VARIABLE}, for a deployment where something other than the eval can make model calls through the proxy. By default it shares --port, and the proxy's access control.",
     )
     parser.add_argument(
         "--reject-status",
@@ -123,19 +134,67 @@ def handler_from_arguments(arguments: argparse.Namespace) -> Handler:
     )
 
 
+def apps(
+    handler: Handler, arguments: argparse.Namespace
+) -> list[tuple[Starlette, int]]:
+    """The apps to serve, each with its port: the endpoints for proxies and for evals together, or each on a port of its own.
+
+    Args:
+        handler: The handler a proxy's requests and replies are put to.
+        arguments: Parsed arguments that `add_arguments` defined.
+
+    Raises:
+        ValueError: If the endpoint for evals has a port of its own, and no token is set for it.
+    """
+    proxy = proxy_app(handler, max_body_bytes=arguments.max_body_bytes)
+    results = not arguments.no_eval_results
+    if arguments.eval_port is None:
+        evals = eval_routes(
+            handler, max_body_bytes=arguments.max_body_bytes, results=results
+        )
+        return [(Starlette(routes=[*proxy.routes, *evals]), arguments.port)]
+    token = os.environ.get(TOKEN_VARIABLE, "")
+    if not token:
+        raise ValueError(
+            f"The endpoint for evals has a port of its own, and needs a token of its own in {TOKEN_VARIABLE}."
+        )
+    evals = eval_routes(
+        handler,
+        max_body_bytes=arguments.max_body_bytes,
+        token=token,
+        results=results,
+    )
+    return [
+        (proxy, arguments.port),
+        (Starlette(routes=[*evals, health_route()]), arguments.eval_port),
+    ]
+
+
 def serve(handler: Handler, arguments: argparse.Namespace) -> None:
-    """Serve the endpoint for proxies.
+    """Serve the endpoints for proxies and for evals.
 
     Args:
         handler: The handler a proxy's requests and replies are put to.
         arguments: Parsed arguments that `add_arguments` defined.
     """
     _quiet_health_checks()
-    uvicorn.run(
-        proxy_app(handler, max_body_bytes=arguments.max_body_bytes),
-        host=arguments.host,
-        port=arguments.port,
-    )
+    servers = [
+        uvicorn.Server(uvicorn.Config(app, host=arguments.host, port=port))
+        for app, port in apps(handler, arguments)
+    ]
+    anyio.run(_serve_all, servers)
+
+
+async def _serve_all(servers: list[uvicorn.Server]) -> None:
+    async def until_one_stops(server: uvicorn.Server) -> None:
+        await server.serve()
+        # one signal stops only the server that caught it
+        for other in servers:
+            other.should_exit = True
+
+    async with anyio.create_task_group() as group:
+        for server in servers:
+            group.start_soon(until_one_stops, server)
 
 
 class _HealthCheckFilter(logging.Filter):

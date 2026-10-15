@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from collections.abc import Awaitable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 import anyio
@@ -48,10 +48,12 @@ from ._registration import (
 )
 from ._state import (
     MADE_KEPT,
+    Attempt,
     Conversation,
     Held,
     Made,
     MemoryState,
+    NotJudged,
     Rejected,
     Run,
     State,
@@ -74,6 +76,40 @@ _MAX_CONSECUTIVE_REJECTIONS = 3
 
 _REJECTED = "This call was rejected."
 _NOT_RUN = "This call was not run, because another call in the same turn was rejected."
+
+
+REQUEST_ID = "x-irid"
+"""The header an Inspect eval names each of its model requests in."""
+
+
+@dataclass(frozen=True)
+class RequestResult:
+    """What happened to a request an eval names."""
+
+    latest: Attempt
+    """The latest attempt at it."""
+    records: list[Record]
+    """What was recorded, every attempt's in order."""
+
+
+@dataclass(frozen=True)
+class RunResult:
+    """What a run came to."""
+
+    outcome: Literal["proceed", "terminate"]
+    """`terminate` if a sentinel ended the run."""
+    store: dict[str, Any]
+    """The sentinel's store, by the keys the sentinel wrote."""
+
+
+def _not_judged(ex: Exception) -> NotJudged:
+    if isinstance(ex, UnreadableError):
+        return "unreadable"
+    if isinstance(ex, UnregisteredSampleError):
+        return "unregistered"
+    if isinstance(ex, TimeLimitError):
+        return "time_limit"
+    return "error"
 
 
 class TimeLimitError(TimeoutError):
@@ -150,9 +186,27 @@ class Handler:
             UnregisteredSampleError: If the request names a sample that a task registered beforehand doesn't hold.
             TimeLimitError: If the handler has a time limit and the sentinel didn't finish within it.
         """
-        with anyio.move_on_after(self._time_limit):
-            return await self._request(request)
-        raise self._out_of_time("request", request.id)
+        id = request.headers.get(REQUEST_ID)
+        attempt = None
+        if id:
+            attempt = await self._state.attempt(id, request.id)
+            # an attempt that is never judged has records too: none
+            await self._state.recorder(request.id)
+        try:
+            answer = await self._within_limit(
+                self._request(request, attempt), "request", request.id
+            )
+        except Exception as ex:
+            if attempt is not None:
+                attempt.not_judged(_not_judged(ex))
+            raise
+        if attempt is not None:
+            if isinstance(answer, Refuse):
+                # a request is refused only when its run has ended
+                attempt.decide("terminate")
+            else:
+                attempt.state = "awaiting_reply"
+        return answer
 
     async def reply(self, reply: Reply) -> Answer:
         """Judge a reply before the proxy passes any of it on.
@@ -169,9 +223,86 @@ class Handler:
             NotImplementedError: If the sentinel decides `modify`, which a sidecar can't carry out yet.
             TimeLimitError: If the handler has a time limit and the sentinel didn't finish within it.
         """
+        held = await self._state.release(reply.id)
+        attempt = held.attempt if held is not None else None
+        try:
+            answer = await self._within_limit(
+                self._reply(reply, held), "reply", reply.id
+            )
+        except Exception as ex:
+            if attempt is not None:
+                attempt.not_judged(_not_judged(ex))
+            raise
+        if attempt is None or held is None:
+            return answer
+        if reply.status != 200:
+            attempt.not_judged("provider_error")
+        elif not isinstance(answer, Refuse):
+            attempt.decide("proceed")
+        elif _ended(await self._state.run(held.run), held.marks) is not None:
+            attempt.decide("terminate")
+        else:
+            attempt.decide("reject", held.exchange.message)
+        return answer
+
+    async def request_result(
+        self, id: str
+    ) -> RequestResult | Literal["dropped", "unknown"]:
+        """What happened to a request an eval names, by the eval's id for it.
+
+        Args:
+            id: The eval's id for the request, as its `x-irid` header gave it. A client that retries a request sends it again under the same id.
+
+        Returns:
+            Where the latest attempt stands, and every attempt's records in order; `dropped` if they were kept and no longer are; or `unknown` if the request was never seen.
+        """
+        attempts = await self._state.attempts(id)
+        if attempts is None:
+            return "unknown"
+        if attempts == "dropped":
+            return "dropped"
+        records: list[Record] = []
+        for attempt in attempts:
+            kept = await self._state.records(attempt.exchange)
+            if kept is None:
+                return "dropped"
+            records.extend(kept)
+        return RequestResult(attempts[-1], records)
+
+    async def run_result(self, run: str) -> RunResult | None:
+        """What a run came to, and the sentinel's store, for an eval to copy into its sample's store before scoring.
+
+        Args:
+            run: The run, as the eval names it: its sample's uuid.
+
+        Returns:
+            The run's outcome and store, or None if nothing is kept for it.
+        """
+        kept = await self._state.existing_run(run)
+        if kept is None:
+            return None
+        return RunResult(
+            "terminate" if kept.refusal is not None else "proceed",
+            dict(kept.store.items()),
+        )
+
+    async def end_run(self, run: str) -> Literal["ended", "unknown"]:
+        """Drop a run's state, once its eval has scored the sample. A later request of the run is refused, as for a run a sentinel ended.
+
+        Args:
+            run: The run, as the eval names it: its sample's uuid.
+
+        Returns:
+            `ended`, or `unknown` for a run the handler never saw. Ending a run again has no effect.
+        """
+        return "ended" if await self._state.end_run(run) else "unknown"
+
+    async def _within_limit(
+        self, judging: Awaitable[Answer], what: str, id: str
+    ) -> Answer:
         with anyio.move_on_after(self._time_limit):
-            return await self._reply(reply)
-        raise self._out_of_time("reply", reply.id)
+            return await judging
+        raise self._out_of_time(what, id)
 
     async def records(self, id: str) -> list[Record] | None:
         """What was recorded while a request and its reply were judged.
@@ -228,7 +359,7 @@ class Handler:
             )
         return found
 
-    async def _request(self, request: Request) -> Answer:
+    async def _request(self, request: Request, attempt: Attempt | None) -> Answer:
         sample = inspect_sample(request.headers)
         proxy = ProxyContext(
             provider=request.provider,
@@ -245,6 +376,10 @@ class Handler:
         key = sample.sample_uuid if sample is not None else opening
         # a conversation is told apart within a named run by how it opens
         conversation_key = f"{key}/{opening}" if named else key
+        if named and await self._state.ended(key):
+            # the eval ended the run once it had scored the sample
+            refusal = Refuse(400, "This run has ended.")
+            return self._with_field(refusal, proxy, Exchange(), Run(refusal=refusal))
         run = await self._state.run(key)
         conversation = run.conversations.setdefault(conversation_key, Conversation())
         messages = await read_request(
@@ -298,6 +433,7 @@ class Handler:
             offered=sends,
             marks=marks,
             proxy=proxy,
+            attempt=attempt,
         )
         said = call_texts(request.provider, request.body, request.format)
         ended = await self._results(held, run, conversation, client, said)
@@ -416,8 +552,7 @@ class Handler:
                 judging.set()
         return None
 
-    async def _reply(self, reply: Reply) -> Answer:
-        held = await self._state.release(reply.id)
+    async def _reply(self, reply: Reply, held: Held | None) -> Answer:
         answer = await self._judge_reply(reply, held)
         if held is None or reply.status != 200:
             return answer
@@ -545,6 +680,7 @@ class Handler:
             for other in message.tool_calls or []
         }
         held.exchange.withheld = Withheld(message, told)
+        held.exchange.message = why
         run.in_a_row += 1
         if run.in_a_row >= _MAX_CONSECUTIVE_REJECTIONS:
             return self._end(

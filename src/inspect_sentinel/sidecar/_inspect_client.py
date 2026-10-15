@@ -92,6 +92,8 @@ class Exchange:
     """The steps judged, in order."""
     withheld: Withheld | None = None
     """The turn the client was refused, if it was."""
+    message: str | None = None
+    """What the model is told of the rejection, if the turn was refused for one."""
 
 
 class SentinelStep(BaseModel):
@@ -179,7 +181,7 @@ def sentinel_field(
                     exclude_defaults=True,
                     include={"action", "message", "modified"} if trimmed else None,
                 ),
-                recorded=None if trimmed else [_record(r) for r in step.records],
+                recorded=None if trimmed else [record_json(r) for r in step.records],
             )
         )
     withheld = exchange.withheld
@@ -265,8 +267,8 @@ def _last_event(
     return found if found is not None else chunk
 
 
-def _record(record: Record) -> dict[str, Any]:
-    # in the form the endpoint for evals gives a request's records
+def record_json(record: Record) -> dict[str, Any]:
+    """A record, as the endpoint for evals and the `sentinel` field write it."""
     written: dict[str, Any] = {
         "kind": record.kind,
         "path": record.path,
