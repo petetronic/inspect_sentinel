@@ -272,7 +272,7 @@ async def test_a_sample_a_task_registered_beforehand_doesnt_hold_is_refused() ->
 
 @pytest.mark.anyio
 async def test_a_sidecar_can_take_no_registrations_from_evals() -> None:
-    handler = Handler(reports_the_eval(), task_registration=False)
+    handler = Handler(reports_the_eval(), runtime_task_registration=False)
 
     with pytest.raises(RegistrationError, match="takes no tasks"):
         await handler.register_task("eval_789", _TASK)

@@ -23,6 +23,7 @@ from inspect_sentinel.sidecar._serve import (
     _quiet_health_checks,
     add_arguments,
     handler_from_arguments,
+    parse_arguments,
 )
 from tests.sidecar._traffic import message, reply, request, weather, weather_rule
 
@@ -101,7 +102,7 @@ def test_defaults_are_one_port_and_no_limits() -> None:
     assert arguments.run_expiry == 24 * 60 * 60
     assert arguments.no_eval_results is False
     assert arguments.tasks is None
-    assert arguments.no_task_registration is False
+    assert arguments.no_runtime_task_registration is False
     assert arguments.task_expiry == 30 * 24 * 60 * 60
 
 
@@ -189,10 +190,117 @@ async def test_tasks_registered_beforehand_are_read_from_the_tasks_file(
 @pytest.mark.anyio
 async def test_a_sidecar_can_be_told_to_take_no_registrations() -> None:
     handler = handler_from_arguments(
-        _arguments("--sentinel", "no_tokyo", "--no-task-registration")
+        _arguments("--sentinel", "no_tokyo", "--no-runtime-task-registration")
     )
 
     with pytest.raises(RegistrationError, match="takes no tasks"):
         await handler.register_task(
             "eval_789", TaskFacts(task="philadelphia", samples=[])
         )
+
+
+_STANZA = """
+sentinel:
+  name: no_tokyo
+sidecar:
+  model_roles:
+    monitor: mockllm/model
+  port: 9000
+  reject_status: 503
+  eval_results: false
+  tasks: tasks.yaml
+  runtime_task_registration: false
+  task_expiry: 60
+"""
+
+
+def test_the_sidecar_stanza_sets_what_the_options_would(tmp_path: Path) -> None:
+    config = tmp_path / "sentinel.yaml"
+    config.write_text(_STANZA)
+
+    arguments = parse_arguments(["--sentinel", str(config)])
+
+    assert arguments.model_role == ["monitor=mockllm/model"]
+    assert (arguments.port, arguments.reject_status) == (9000, 503)
+    assert (arguments.no_eval_results, arguments.no_runtime_task_registration) == (
+        True,
+        True,
+    )
+    assert arguments.task_expiry == 60
+    # a file the stanza names is found beside the configuration file
+    assert arguments.tasks == str(tmp_path.resolve() / "tasks.yaml")
+    # the sentinel is built from the file's sentinel, which the core reads
+    assert arguments.sentinel_config == {"name": "no_tokyo"}
+
+
+@pytest.mark.parametrize(
+    "given",
+    [["--reject-status", "400"], ["--reject-status=400"]],
+    ids=["option and value", "option=value"],
+)
+def test_an_option_given_wins_over_the_stanza_even_at_its_default(
+    tmp_path: Path, given: list[str]
+) -> None:
+    config = tmp_path / "sentinel.yaml"
+    config.write_text(_STANZA)
+
+    arguments = parse_arguments(["--sentinel", str(config), *given])
+
+    assert arguments.reject_status == 400
+    assert arguments.port == 9000
+
+
+@pytest.mark.anyio
+async def test_a_handler_is_built_from_a_file_with_a_stanza(tmp_path: Path) -> None:
+    config = tmp_path / "sentinel.yaml"
+    config.write_text("sentinel:\n  name: no_tokyo\nsidecar:\n  reject_status: 503\n")
+    handler = handler_from_arguments(parse_arguments(["--sentinel", str(config)]))
+    await handler.request(request())
+
+    answer = await handler.reply(reply(message(weather("Tokyo"))))
+
+    assert answer == Refuse(
+        503, "A sentinel rejected the call to get_weather: Tokyo is not allowed."
+    )
+
+
+def test_a_file_without_a_stanza_is_read_as_an_eval_reads_it(tmp_path: Path) -> None:
+    config = tmp_path / "sentinel.yaml"
+    config.write_text("sentinel:\n  name: no_tokyo\n")
+
+    arguments = parse_arguments(["--sentinel", str(config)])
+
+    assert arguments.sentinel_config == str(config)
+    assert arguments.reject_status == 400
+
+
+def test_a_registered_name_is_found_as_an_eval_finds_it() -> None:
+    assert parse_arguments(["--sentinel", "no_tokyo"]).sentinel_config == "no_tokyo"
+
+
+@pytest.mark.parametrize(
+    ("text", "says"),
+    [
+        ("sentinel:\n  name: no_tokyo\nsidecar:\n  colour: blue\n", "doesn't fit"),
+        (
+            "sentinel:\n  name: no_tokyo\nsidecar: {}\nother: 1\n",
+            "only `sentinel` and `sidecar`",
+        ),
+        ("sidecar:\n  port: 9000\n", "only `sentinel` and `sidecar`"),
+        ("sentinel: [oops\n", "could not parse"),
+    ],
+    ids=[
+        "a setting the sidecar doesn't have",
+        "another key",
+        "no sentinel",
+        "not YAML",
+    ],
+)
+def test_a_configuration_that_cant_be_read(
+    tmp_path: Path, text: str, says: str
+) -> None:
+    config = tmp_path / "sentinel.yaml"
+    config.write_text(text)
+
+    with pytest.raises(ValueError, match=says):
+        parse_arguments(["--sentinel", str(config)])

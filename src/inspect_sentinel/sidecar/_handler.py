@@ -136,7 +136,7 @@ class Handler:
         time_limit: float | None = None,
         eval_results: bool = True,
         tasks: Mapping[str, FileTask] | None = None,
-        task_registration: bool = True,
+        runtime_task_registration: bool = True,
         task_expiry: float = MAX_TASK_EXPIRY,
     ) -> None:
         """Create a handler.
@@ -149,7 +149,7 @@ class Handler:
             time_limit: The longest the sentinel may take to judge one request or one reply, in seconds, after which it is cancelled. None, the default, is no limit.
             eval_results: Whether an Inspect client's `sentinel` field holds the results: the explanations, references and metadata of the decisions, and what each monitor and protocol recorded. Without them, it holds only what Inspect acts on. A monitor's explanation tells an agent what the monitor looks for, so a client that can't be trusted is not sent them.
             tasks: Tasks registered beforehand, by name, as a tasks file holds them. Nothing an eval registers replaces one, and a request for a sample one doesn't hold is refused.
-            task_registration: Whether an eval may register its tasks itself, at task init.
+            runtime_task_registration: Whether an eval may register its tasks itself, at task init.
             task_expiry: The longest a task an eval registered is kept once no request has named it, in seconds, whatever the registration asks.
         """
         self._protocol = resolve_sentinel(sentinel)
@@ -161,7 +161,7 @@ class Handler:
         self._time_limit = time_limit
         self._eval_results = eval_results
         self._tasks = dict(tasks or {})
-        self._task_registration = task_registration
+        self._runtime_task_registration = runtime_task_registration
         self._task_expiry = task_expiry
         # the tool results being judged now, by run, conversation and digest,
         # so that a request holding one waits for the request judging it
@@ -333,7 +333,7 @@ class Handler:
         Raises:
             RegistrationError: If the handler takes no registrations from evals, or the task was registered beforehand.
         """
-        if not self._task_registration:
+        if not self._runtime_task_registration:
             raise RegistrationError(
                 "This sidecar takes no tasks registered by an eval."
             )

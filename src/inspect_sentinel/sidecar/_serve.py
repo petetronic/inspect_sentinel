@@ -3,9 +3,15 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import sys
+from collections.abc import Callable, Sequence
+from pathlib import Path
+from typing import Any, cast
 
 import anyio
 import uvicorn
+import yaml
+from pydantic import BaseModel, ConfigDict, ValidationError
 from starlette.applications import Starlette
 
 from .._config import sentinel_from_config
@@ -27,7 +33,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--sentinel",
         required=True,
-        help="A YAML or JSON sentinel configuration file, or the registered name of a monitor or protocol.",
+        help="A YAML or JSON sentinel configuration file, or the registered name of a monitor or protocol. Beside `sentinel`, the file may hold a `sidecar` stanza with the sidecar's own settings, which the options given here override.",
     )
     parser.add_argument(
         "--model-role",
@@ -79,7 +85,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help="A YAML or JSON tasks file: the tasks registered beforehand, which an eval can't replace. A request for a sample of one of them that the file doesn't hold is refused.",
     )
     parser.add_argument(
-        "--no-task-registration",
+        "--no-runtime-task-registration",
         action="store_true",
         help="Take no tasks registered by an eval at task init. Where an eval can't be trusted, tasks are registered beforehand with --tasks instead.",
     )
@@ -106,6 +112,127 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+class SidecarSettings(BaseModel):
+    """The `sidecar` stanza of a sentinel configuration file: the sidecar's own settings, beside the sentinel's.
+
+    Each key is one of the sidecar's command-line options, with underscores, and a `--no-` option is the setting turned off. Model roles are `model_roles`, as inspect_ai names them.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    model_roles: dict[str, str] | None = None
+    host: str | None = None
+    port: int | None = None
+    eval_port: int | None = None
+    reject_status: int | None = None
+    time_limit: float | None = None
+    eval_results: bool | None = None
+    tasks: str | None = None
+    runtime_task_registration: bool | None = None
+    task_expiry: float | None = None
+    max_body_bytes: int | None = None
+    run_expiry: float | None = None
+
+
+# each setting of the stanza, with the option that overrides it, and what it
+# sets the option to
+_OPTIONS: dict[str, tuple[str, str, Callable[[Any, Path], Any]]] = {
+    "model_roles": (
+        "--model-role",
+        "model_role",
+        lambda roles, _: [f"{role}={model}" for role, model in roles.items()],
+    ),
+    "eval_results": ("--no-eval-results", "no_eval_results", lambda on, _: not on),
+    "runtime_task_registration": (
+        "--no-runtime-task-registration",
+        "no_runtime_task_registration",
+        lambda on, _: not on,
+    ),
+    # a file the stanza names is found beside the configuration file
+    "tasks": ("--tasks", "tasks", lambda tasks, base: str(base / tasks)),
+    **{
+        name: (f"--{name.replace('_', '-')}", name, lambda value, _: value)
+        for name in (
+            "host",
+            "port",
+            "eval_port",
+            "reject_status",
+            "time_limit",
+            "task_expiry",
+            "max_body_bytes",
+            "run_expiry",
+        )
+    },
+}
+
+
+def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    """Parse the sidecar's command line, with the settings of the configuration file's `sidecar` stanza under it.
+
+    An option given on the command line wins over the stanza, and the stanza wins over the option's default.
+
+    Args:
+        argv: The arguments, without the program's name. The process's own if not given.
+
+    Raises:
+        ValueError: If the configuration file can't be read, or its stanza holds a setting the sidecar doesn't have.
+    """
+    given = list(sys.argv[1:] if argv is None else argv)
+    parser = argparse.ArgumentParser(
+        prog="python -m inspect_sentinel.sidecar",
+        description="Run a sentinel in a sidecar, beside a model proxy.",
+        # an abbreviated option would go unnoticed as overriding the stanza
+        allow_abbrev=False,
+    )
+    add_arguments(parser)
+    arguments = parser.parse_args(given)
+    sentinel, settings = read_configuration(arguments.sentinel)
+    arguments.sentinel_config = sentinel
+    if settings is None:
+        return arguments
+    base = Path(arguments.sentinel).resolve().parent
+    for name, value in settings.model_dump(exclude_none=True).items():
+        option, dest, convert = _OPTIONS[name]
+        if not any(arg == option or arg.startswith(f"{option}=") for arg in given):
+            setattr(arguments, dest, convert(value, base))
+    return arguments
+
+
+def read_configuration(config: str) -> tuple[Any, SidecarSettings | None]:
+    """Read a sentinel configuration, and its `sidecar` stanza if it has one.
+
+    Args:
+        config: A YAML or JSON sentinel configuration file, or the registered name of a monitor or protocol.
+
+    Returns:
+        What to build the sentinel from, which is `config` itself unless the file has a stanza, and the stanza's settings, or None.
+
+    Raises:
+        ValueError: If the file has keys other than `sentinel` and `sidecar`, or its stanza holds a setting the sidecar doesn't have.
+    """
+    path = Path(config)
+    if not path.is_file():
+        # a registered name, which the core loader finds
+        return config, None
+    try:
+        content: object = yaml.safe_load(path.read_text())
+    except yaml.YAMLError as ex:
+        raise ValueError(f"{config}: could not parse the file: {ex}") from None
+    if not isinstance(content, dict) or "sidecar" not in content:
+        # the core loader reads a file without a stanza, as an eval does
+        return config, None
+    content = cast("dict[str, Any]", content)
+    if set(content) != {"sentinel", "sidecar"}:
+        raise ValueError(
+            f"{config}: a sentinel configuration file with a sidecar stanza holds only `sentinel` and `sidecar`."
+        )
+    try:
+        settings = SidecarSettings.model_validate(content["sidecar"] or {})
+    except ValidationError as ex:
+        raise ValueError(f"{config}: the sidecar stanza doesn't fit: {ex}") from None
+    return content["sentinel"], settings
+
+
 def handler_from_arguments(arguments: argparse.Namespace) -> Handler:
     """Build the handler the arguments describe.
 
@@ -122,14 +249,14 @@ def handler_from_arguments(arguments: argparse.Namespace) -> Handler:
             raise ValueError(f"--model-role takes ROLE=MODEL, not {role!r}.")
         roles[name] = model
     return Handler(
-        sentinel_from_config(arguments.sentinel),
+        sentinel_from_config(getattr(arguments, "sentinel_config", arguments.sentinel)),
         host=SidecarHost(roles),
         state=MemoryState(expiry=arguments.run_expiry),
         reject_status=arguments.reject_status,
         time_limit=arguments.time_limit,
         eval_results=not arguments.no_eval_results,
         tasks=read_tasks_file(arguments.tasks) if arguments.tasks else None,
-        task_registration=not arguments.no_task_registration,
+        runtime_task_registration=not arguments.no_runtime_task_registration,
         task_expiry=arguments.task_expiry,
     )
 
