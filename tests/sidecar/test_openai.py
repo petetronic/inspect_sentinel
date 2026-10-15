@@ -28,6 +28,7 @@ from tests.sidecar._traffic import (
     JSON,
     OPENAI_RECORDED,
     STREAM,
+    inspect_headers,
     openai_ran,
     openai_recorded,
     openai_request,
@@ -708,7 +709,11 @@ def _function_calls(body: bytes) -> list[tuple[str, str, str]]:
 @pytest.mark.anyio
 async def test_a_rejected_turn_is_put_back_as_its_own_run_was_handed_it() -> None:
     handler = Handler(weather_rule("reject", "Tokyo"))
-    await handler.request(replace(_request("responses", "a"), run="run_a"))
+    await handler.request(
+        replace(
+            _request("responses", "a"), headers=inspect_headers(sample_uuid="run_a")
+        )
+    )
     first = _reply("responses", "a")
     await handler.reply(first)
     # another run's model reuses the call ids, with arguments of its own
@@ -716,10 +721,18 @@ async def test_a_rejected_turn_is_put_back_as_its_own_run_was_handed_it() -> Non
     for item in other["output"]:
         if item["type"] == "function_call":
             item["arguments"] = json.dumps({"location": "Tokyo", "note": "run b's"})
-    await handler.request(replace(_request("responses", "b"), run="run_b"))
+    await handler.request(
+        replace(
+            _request("responses", "b"), headers=inspect_headers(sample_uuid="run_b")
+        )
+    )
     await handler.reply(replace(first, id="b", body=json.dumps(other).encode()))
 
-    again = await handler.request(replace(_request("responses", "c"), run="run_a"))
+    again = await handler.request(
+        replace(
+            _request("responses", "c"), headers=inspect_headers(sample_uuid="run_a")
+        )
+    )
 
     assert isinstance(again, Replace)
     handed = json.loads(first.body)["output"]

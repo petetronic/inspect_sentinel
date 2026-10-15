@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
+from typing import Any, Literal
 
 import anyio
 from inspect_ai.model import (
@@ -13,6 +15,7 @@ from inspect_ai.model import (
 from inspect_ai.tool import ToolCall
 from pydantic import JsonValue
 
+from .._context import ProxyContext
 from .._host import HostNative
 from .._integration import HostContext, resolve_sentinel, run_sentinel, watched_stages
 from .._report import Decision
@@ -25,8 +28,16 @@ from .._step import (
 )
 from .._types import Sentinels
 from ._exchange import Answer, Pass, Refuse, Replace, Reply, Request
-from ._host import Record, SidecarHost
+from ._host import Record, SidecarHost, stage
 from ._inspect_ai import tool_call_view
+from ._inspect_client import (
+    Exchange,
+    Judged,
+    Withheld,
+    inspect_sample,
+    sentinel_field,
+    with_sentinel,
+)
 from ._state import (
     MADE_KEPT,
     Conversation,
@@ -67,6 +78,8 @@ class Handler:
     It knows nothing of any proxy, nor of how it is reached. The endpoint for proxies turns each message it is sent into a `Request` or a `Reply`, and turns the `Answer` back into what it answers with.
 
     The four steps are found in the traffic. A request carries the results of the tool calls the client ran, judged as `AfterToolCall`, and is judged as `BeforeGenerate` before it goes to the provider. A reply is judged as `AfterGenerate`, and each tool call in it as `BeforeToolCall`, before the client is handed any of it.
+
+    An Inspect eval names the sample of each request in its `x-inspect-context` header, and the sample is the run. It is told what was decided in the `sentinel` field: on a refusal, and on every reply, which is then answered with `Replace`. Any other client is handed the provider's reply as it was.
     """
 
     def __init__(
@@ -77,6 +90,7 @@ class Handler:
         state: State | None = None,
         reject_status: int = 400,
         time_limit: float | None = None,
+        eval_results: bool = True,
     ) -> None:
         """Create a handler.
 
@@ -86,6 +100,7 @@ class Handler:
             state: Where runs are kept. Defaults to this process's memory.
             reject_status: The HTTP status a rejected turn is refused with. The default, 400, is one a client takes as final. A status a client retries by itself, such as 503, brings the client back with the same request, which then goes on with the rejection added.
             time_limit: The longest the sentinel may take to judge one request or one reply, in seconds, after which it is cancelled. None, the default, is no limit.
+            eval_results: Whether an Inspect client's `sentinel` field holds the results: the explanations, references and metadata of the decisions, and what each monitor and protocol recorded. Without them, it holds only what Inspect acts on. A monitor's explanation tells an agent what the monitor looks for, so a client that can't be trusted is not sent them.
         """
         self._protocol = resolve_sentinel(sentinel)
         # a stage nothing watches is never built, as in Inspect's own process
@@ -94,6 +109,7 @@ class Handler:
         self._state: State = state if state is not None else MemoryState()
         self._reject_status = reject_status
         self._time_limit = time_limit
+        self._eval_results = eval_results
         # the tool results being judged now, by run, conversation and digest,
         # so that a request holding one waits for the request judging it
         self._judging: dict[tuple[str, str, str], anyio.Event] = {}
@@ -105,13 +121,15 @@ class Handler:
 
         If turns were rejected earlier in the conversation this request continues, they are added where they happened, so the model is still told.
 
-        A request of a run that a sentinel has ended is refused, and the sentinel is not asked again. For a run the proxy didn't name, that is a request which continues the conversation the run was ended in.
+        A request with `x-inspect-context` belongs to the sample it names, which is its run. A refusal then carries the `sentinel` field.
+
+        A request of a run that a sentinel has ended is refused, and the sentinel is not asked again. For a run no eval names, that is a request which continues the conversation the run was ended in.
 
         Args:
             request: The request, as the proxy handed it over.
 
         Raises:
-            UnreadableError: If the request can't be read, so neither it nor its reply could be judged.
+            UnreadableError: If the request, or its `x-inspect-context` header, can't be read, so neither it nor its reply could be judged.
             TimeLimitError: If the handler has a time limit and the sentinel didn't finish within it.
         """
         with anyio.move_on_after(self._time_limit):
@@ -122,6 +140,8 @@ class Handler:
         """Judge a reply before the proxy passes any of it on.
 
         The reply is put to the sentinel as an `AfterGenerate` step, then each tool call in it as a `BeforeToolCall` step, in order, leaving out a stage nothing in the sentinel watches. The first call that is rejected refuses the whole turn, and the rejection is kept for the later requests of its conversation. The third rejected turn in a row ends the run. A provider's error is passed on unjudged.
+
+        For an Inspect client, a reply that goes on is answered with `Replace`, the reply with the `sentinel` field added, and a refusal carries the field. The field holds every step judged during the exchange, the request's first.
 
         Args:
             reply: The reply, as the proxy handed it over.
@@ -147,11 +167,20 @@ class Handler:
         return await self._state.records(id)
 
     async def _request(self, request: Request) -> Answer:
+        sample = inspect_sample(request.headers)
+        proxy = ProxyContext(
+            provider=request.provider,
+            model=request.model,
+            user=request.user,
+            headers=request.headers,
+            inspect=sample,
+        )
         opening = _opening(
             await read_opening(request.provider, request.body, request.format)
         )
-        named = request.run is not None
-        key = request.run if request.run is not None else opening
+        # an Inspect eval names the run: its sample, across retries
+        named = sample is not None
+        key = sample.sample_uuid if sample is not None else opening
         # a conversation is told apart within a named run by how it opens
         conversation_key = f"{key}/{opening}" if named else key
         run = await self._state.run(key)
@@ -164,18 +193,22 @@ class Handler:
         refusal = _ended(run, marks)
         if refusal is not None:
             # the run has ended, and the sentinel is not asked again
-            return refusal
+            return self._with_field(refusal, proxy, Exchange(), run)
 
         answer: Answer = Pass()
         # only what the client sent holds results to judge: what the sidecar
         # adds below is its own writing
         client = messages
-        # a point this request doesn't continue from is kept for the requests
-        # that do: a run's key is shared by conversations that open alike
+        # A point this request doesn't continue from is kept for the requests
+        # that do: a run's key is shared by conversations that open alike. A
+        # client that was handed a rejected turn, as an Inspect eval is in the
+        # sentinel field, may already have put it back itself.
+        holds = {_digest(message) for message in messages}
         told = {
-            rejected.sent: rejected.turns
+            rejected.sent: turns
             for rejected in conversation.rejected
             if rejected.sent < len(marks) and marks[rejected.sent] == rejected.mark
+            if (turns := [t for t in rejected.turns if _digest(t[0]) not in holds])
         }
         if told:
             body = await add_rejections(
@@ -197,11 +230,12 @@ class Handler:
             calls=_calls(client),
             offered=sends,
             marks=marks,
+            proxy=proxy,
         )
         said = call_texts(request.provider, request.body, request.format)
         ended = await self._results(held, run, conversation, client, said)
         if ended is not None:
-            return ended
+            return self._with_field(ended, proxy, held.exchange, run)
         if BeforeGenerate in self._watched:
             before = BeforeGenerate(
                 model=held.model,
@@ -214,12 +248,18 @@ class Handler:
                 config=sends.config,
             )
             if _ends(await self._judge(held, run, before)):
-                return self._end(held, run, "before the model was called")
+                return self._with_field(
+                    self._end(held, run, "before the model was called"),
+                    proxy,
+                    held.exchange,
+                    run,
+                )
         # another exchange of the run may have ended it while this one waited
         refusal = _ended(run, marks)
         if refusal is not None:
-            return refusal
+            return self._with_field(refusal, proxy, held.exchange, run)
         await self._state.hold(request.id, held)
+        # an Inspect client is told of the request's steps with the reply
         return answer
 
     async def _results(
@@ -311,6 +351,19 @@ class Handler:
 
     async def _reply(self, reply: Reply) -> Answer:
         held = await self._state.release(reply.id)
+        answer = await self._judge_reply(reply, held)
+        if held is None or reply.status != 200:
+            return answer
+        if held.proxy.inspect is None:
+            return answer
+        run = await self._state.run(held.run)
+        if isinstance(answer, Refuse):
+            return self._with_field(answer, held.proxy, held.exchange, run)
+        body = answer.body if isinstance(answer, Replace) else reply.body
+        field = self._field(held.exchange, "proceed")
+        return Replace(with_sentinel(reply.content_type, body, field))
+
+    async def _judge_reply(self, reply: Reply, held: Held | None) -> Answer:
         if reply.status != 200:
             # nothing came from the model to judge
             return Pass()
@@ -374,6 +427,8 @@ class Handler:
                 raise NotImplementedError(
                     f"A sidecar can't carry out a {decision.action!r} decision yet."
                 )
+            # the turn is refused, so the client is never handed the call
+            held.exchange.judged[-1].original = call
             # another exchange of the run may have ended it while this one waited
             return _ended(run, held.marks) or self._reject(
                 held, run, conversation, message, noted, call, decision
@@ -416,6 +471,13 @@ class Handler:
         call: ToolCall,
         decision: Decision,
     ) -> Refuse:
+        # only `message` is for the agent; a decision's explanation is for the log
+        why = decision.message or _REJECTED
+        told = {
+            other.id: why if other.id == call.id else _NOT_RUN
+            for other in message.tool_calls or []
+        }
+        held.exchange.withheld = Withheld(message, told)
         run.in_a_row += 1
         if run.in_a_row >= _MAX_CONSECUTIVE_REJECTIONS:
             return self._end(
@@ -436,29 +498,46 @@ class Handler:
         if rejected is None:
             rejected = Rejected(held.sent, held.mark, [])
             conversation.rejected.append(rejected)
-        # only `message` is for the agent; a decision's explanation is for the log
-        why = decision.message or _REJECTED
-        rejected.turns.append(
-            (
-                message,
-                {
-                    other.id: why if other.id == call.id else _NOT_RUN
-                    for other in message.tool_calls or []
-                },
-                noted,
-            )
-        )
+        rejected.turns.append((message, told, noted))
         return Refuse(
             self._reject_status,
             f"A sentinel rejected the call to {call.function}: {why}",
         )
 
     async def _judge(self, held: Held, run: Run, step: Step) -> Decision | None:
-        return await run_sentinel(
+        recorded = len(held.recorder.records)
+        decision = await run_sentinel(
             self._protocol,
-            HostContext(host=self._host, recorder=held.recorder, store=run.store),
+            HostContext(
+                host=self._host,
+                recorder=held.recorder,
+                store=run.store,
+                proxy=held.proxy,
+            ),
             step,
         )
+        call = (
+            step.call.id if isinstance(step, BeforeToolCall | AfterToolCall) else None
+        )
+        held.exchange.judged.append(
+            Judged(stage(step), call, decision, held.recorder.records[recorded:])
+        )
+        return decision
+
+    def _with_field(
+        self, refusal: Refuse, proxy: ProxyContext, exchange: Exchange, run: Run
+    ) -> Refuse:
+        # an Inspect client is told what was decided, with the refusal
+        if proxy.inspect is None:
+            return refusal
+        # a run an eval names is remembered as ended
+        outcome = "terminate" if run.refusal is not None else "reject"
+        return replace(refusal, sentinel=self._field(exchange, outcome))
+
+    def _field(
+        self, exchange: Exchange, outcome: Literal["proceed", "reject", "terminate"]
+    ) -> dict[str, Any]:
+        return sentinel_field(exchange, outcome, trimmed=not self._eval_results)
 
     def _end(self, held: Held, run: Run, where: str) -> Refuse:
         for conversation in run.conversations.values():
@@ -469,7 +548,7 @@ class Handler:
             run.refusal = refusal
         elif held.answered:
             run.ended_at[held.mark] = refusal
-        # A run the proxy didn't name, ended before any reply in its
+        # A run no eval names, ended before any reply in its
         # conversation was passed on, is not remembered as ended. Its
         # conversation is still only how it opens, which is all another
         # conversation with the same key has too, and nothing tells them apart.
@@ -483,8 +562,8 @@ class Handler:
 
 def _ended(run: Run, marks: Sequence[str]) -> Refuse | None:
     # what a request is refused with, if its run has ended: any request of a
-    # run the proxy names, or one that continues the conversation it was
-    # ended in
+    # run an eval names, or one that continues the conversation it was ended
+    # in
     return run.refusal or next(
         (run.ended_at[mark] for mark in marks if mark in run.ended_at), None
     )
@@ -509,6 +588,25 @@ def _opening(messages: Sequence[ChatMessage]) -> str:
     ][:1]
     digest = hashlib.sha256("\x00".join(m.text for m in opening).encode())
     return digest.hexdigest()[:16]
+
+
+def _digest(message: ChatMessage) -> str:
+    # What makes two messages the same turn. A reply the sidecar read, and the
+    # same reply sent back in a later request, are read with different ids,
+    # sources and provider details, so only what the turn says is compared.
+    calls = [
+        [call.id, call.function, call.arguments]
+        for call in (
+            message.tool_calls if isinstance(message, ChatMessageAssistant) else None
+        )
+        or []
+    ]
+    result = message.tool_call_id if isinstance(message, ChatMessageTool) else None
+    return hashlib.sha256(
+        json.dumps(
+            [message.role, message.text, calls, result], sort_keys=True, default=str
+        ).encode()
+    ).hexdigest()
 
 
 def _calls(messages: Sequence[ChatMessage]) -> dict[str, int]:

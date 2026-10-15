@@ -126,19 +126,6 @@
           "description": "Who the proxy signed the caller in as.",
           "title": "User"
         },
-        "run": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "The run the request belongs to, where the proxy names runs in a way of its own. A sentinel's state is kept by run.",
-          "title": "Run"
-        },
         "headers": {
           "additionalProperties": {
             "type": "string"
@@ -196,6 +183,18 @@
           "description": "What the caller is told.",
           "title": "Message",
           "type": "string"
+        },
+        "sentinel": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SentinelField"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For an Inspect client: what was decided. The proxy hook puts it into the error it sends the caller, as a top-level `sentinel` field beside the error's own, without reading it."
         }
       },
       "required": [
@@ -206,7 +205,7 @@
       "type": "object"
     },
     "ReplaceReplyResult": {
-      "description": "Send the caller this reply body in place of the provider's.",
+      "description": "Send the caller this reply body in place of the provider's. An Inspect client's reply is always replaced, to add the `sentinel` field.",
       "properties": {
         "action": {
           "const": "replace",
@@ -246,6 +245,164 @@
         "body"
       ],
       "title": "ReplaceRequestResult",
+      "type": "object"
+    },
+    "SentinelField": {
+      "description": "What a sentinel decided during one exchange, for an Inspect client: the `sentinel` field.",
+      "properties": {
+        "version": {
+          "const": 1,
+          "default": 1,
+          "description": "The version of the field.",
+          "title": "Version",
+          "type": "integer"
+        },
+        "outcome": {
+          "description": "What the exchange came to: `proceed` when the reply goes on, `reject` when the model's turn was refused and the run goes on, and `terminate` when the run has ended, in this exchange or before it.",
+          "enum": [
+            "proceed",
+            "reject",
+            "terminate"
+          ],
+          "title": "Outcome",
+          "type": "string"
+        },
+        "trimmed": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "True when the sidecar was told not to send results, so each step holds only what Inspect acts on: its stage, its call, `original`, and its decision's action, message and modified call.",
+          "title": "Trimmed"
+        },
+        "steps": {
+          "description": "Every step judged during the exchange, in the order they were judged. A step that ended the run is the last. Empty when the run had already ended.",
+          "items": {
+            "$ref": "#/$defs/SentinelStep"
+          },
+          "title": "Steps",
+          "type": "array"
+        },
+        "withheld": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WithheldTurn"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The model's turn, when the client was refused it because a call in it was rejected."
+        }
+      },
+      "required": [
+        "outcome",
+        "steps"
+      ],
+      "title": "SentinelField",
+      "type": "object"
+    },
+    "SentinelStep": {
+      "description": "One step judged during an exchange.",
+      "properties": {
+        "stage": {
+          "description": "Where the step was judged, as Inspect's sentinel events name it.",
+          "enum": [
+            "model_input",
+            "model_output",
+            "tool_call",
+            "tool_result"
+          ],
+          "title": "Stage",
+          "type": "string"
+        },
+        "call": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The id of the tool call, at a tool stage.",
+          "title": "Call"
+        },
+        "original": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The call the model proposed, as Inspect writes a tool call. There only when the client is not handed the call as the model proposed it.",
+          "title": "Original"
+        },
+        "decision": {
+          "additionalProperties": true,
+          "description": "The step's final decision, as the core package writes a `Decision`.",
+          "title": "Decision",
+          "type": "object"
+        },
+        "recorded": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What each monitor and protocol recorded for the step. Left out of a trimmed field.",
+          "title": "Recorded"
+        }
+      },
+      "required": [
+        "stage",
+        "decision"
+      ],
+      "title": "SentinelStep",
+      "type": "object"
+    },
+    "WithheldTurn": {
+      "description": "The model's turn, which the client was refused.",
+      "properties": {
+        "message": {
+          "additionalProperties": true,
+          "description": "The model's message, every call in it included, as Inspect writes a `ChatMessageAssistant`.",
+          "title": "Message",
+          "type": "object"
+        },
+        "results": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "What the model is told happened to each of its calls, by call id. The sidecar adds the turn and these results to each later request of the conversation that doesn't already hold the turn.",
+          "title": "Results",
+          "type": "object"
+        }
+      },
+      "required": [
+        "message",
+        "results"
+      ],
+      "title": "WithheldTurn",
       "type": "object"
     }
   },

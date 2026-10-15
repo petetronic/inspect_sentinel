@@ -28,6 +28,7 @@ from tests.sidecar._traffic import (
     STREAM,
     anthropic_recorded,
     message,
+    plain,
     ran,
     reply,
     request,
@@ -791,30 +792,26 @@ async def test_a_result_is_judged_against_what_the_model_was_sent() -> None:
 
 
 @pytest.mark.anyio
-async def test_runs_the_proxy_tells_apart_share_nothing() -> None:
+async def test_samples_share_nothing() -> None:
     # two epochs of one sample: the same conversation, and nothing in common
     handler = Handler(weather_rule("reject", "Tokyo"))
-    await handler.request(request("a", run="epoch-1"))
+    await handler.request(request("a", sample="epoch-1"))
     await handler.reply(reply(message(weather("Tokyo")), id="a"))
 
-    other = await handler.request(request("b", run="epoch-2"))
-    told = await handler.request(request("c", run="epoch-1"))
+    other = await handler.request(request("b", sample="epoch-2"))
+    told = await handler.request(request("c", sample="epoch-1"))
 
     assert other == Pass()
     assert isinstance(told, Replace)
 
 
 @pytest.mark.anyio
-async def test_a_run_the_proxy_names_is_one_run_however_its_conversations_open() -> (
-    None
-):
+async def test_a_sample_is_one_run_however_its_conversations_open() -> None:
     handler = Handler(third_lookup_ends_the_run())
 
-    async def lookup(id: str, opening: str) -> Pass | Refuse:
-        await handler.request(request(id, opening, run="sample-1"))
-        answer = await handler.reply(reply(message(weather("Oslo")), id=id))
-        assert isinstance(answer, (Pass, Refuse))
-        return answer
+    async def lookup(id: str, opening: str) -> Answer:
+        await handler.request(request(id, opening, sample="sample-1"))
+        return await handler.reply(reply(message(weather("Oslo")), id=id))
 
     answers = [
         await lookup("a", "The agent's conversation"),
@@ -822,51 +819,51 @@ async def test_a_run_the_proxy_names_is_one_run_however_its_conversations_open()
         await lookup("c", "The agent's conversation"),
     ]
 
-    assert [type(answer) for answer in answers] == [Pass, Pass, Refuse]
+    assert [isinstance(answer, Refuse) for answer in answers] == [False, False, True]
 
 
 @pytest.mark.anyio
-async def test_every_later_request_of_a_named_run_that_ended_is_refused() -> None:
+async def test_every_later_request_of_a_sample_that_ended_is_refused() -> None:
     handler = Handler(weather_rule("terminate", "Tokyo"))
-    await handler.request(request("a", run="sample-1"))
+    await handler.request(request("a", sample="sample-1"))
     ended = await handler.reply(reply(message(weather("Tokyo")), id="a"))
 
-    again = await handler.request(request("b", run="sample-1"))
+    again = await handler.request(request("b", sample="sample-1"))
     subagent = await handler.request(
-        request("c", "A subagent's conversation", run="sample-1")
+        request("c", "A subagent's conversation", sample="sample-1")
     )
-    other = await handler.request(request("d", run="sample-2"))
+    other = await handler.request(request("d", sample="sample-2"))
 
-    assert (ended, again, subagent) == (_ENDED, _ENDED, _ENDED)
+    assert [plain(answer) for answer in (ended, again, subagent)] == [_ENDED] * 3
     assert other == Pass()
     # the sentinel was not asked again
     assert await handler.records("b") is None
 
 
 @pytest.mark.anyio
-async def test_a_named_run_ended_at_a_result_is_refused_without_that_result() -> None:
+async def test_a_sample_ended_at_a_result_is_refused_without_that_result() -> None:
     handler = Handler(storm_rule())
     ended = await handler.request(
-        request("a", then=ran("Oslo", "storm"), run="sample-1")
+        request("a", then=ran("Oslo", "storm"), sample="sample-1")
     )
 
-    later = await handler.request(request("b", run="sample-1"))
+    later = await handler.request(request("b", sample="sample-1"))
 
     assert isinstance(ended, Refuse)
-    assert later == ended
+    assert plain(later) == plain(ended)
 
 
 @pytest.mark.anyio
-async def test_a_named_run_ended_while_the_model_answered_is_refused() -> None:
+async def test_a_sample_ended_while_the_model_answered_is_refused() -> None:
     # two conversations of one run, the second ended while the first waited
     handler = Handler(weather_rule("terminate", "Tokyo"))
-    await handler.request(request("a", run="sample-1"))
-    await handler.request(request("b", "A subagent's conversation", run="sample-1"))
+    await handler.request(request("a", sample="sample-1"))
+    await handler.request(request("b", "A subagent's conversation", sample="sample-1"))
     ended = await handler.reply(reply(message(weather("Tokyo")), id="b"))
 
     late = await handler.reply(reply(message(weather("Oslo")), id="a"))
 
-    assert (ended, late) == (_ENDED, _ENDED)
+    assert (plain(ended), plain(late)) == (_ENDED, _ENDED)
 
 
 @pytest.mark.anyio
@@ -915,19 +912,19 @@ def reports_the_conversation() -> Protocol:
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    ("run", "expected"),
+    ("sample", "expected"),
     [
         # a conversation is told apart within the run by how it opens
         ("sample-uuid", r"sample-uuid/[0-9a-f]{16}"),
-        # how the conversation opens stands in for a run the proxy doesn't name
+        # how the conversation opens stands in for a run no eval names
         (None, r"[0-9a-f]{16}"),
     ],
 )
-async def test_sentinel_is_given_the_run_the_proxy_names(
-    run: str | None, expected: str
+async def test_sentinel_is_given_the_run_the_eval_names(
+    sample: str | None, expected: str
 ) -> None:
     handler = Handler(reports_the_conversation())
-    await handler.request(request(run=run))
+    await handler.request(request(sample=sample))
 
     answer = await handler.reply(reply(message(weather("Oslo"))))
 
@@ -949,7 +946,7 @@ async def test_a_reply_in_flight_when_its_conversation_ended_is_refused() -> Non
     ended = await handler.reply(reply(message(weather("Tokyo")), id="b"))
     late = await handler.reply(reply(message(weather("Lima")), id="c"))
 
-    assert (ended, late) == (_ENDED, _ENDED)
+    assert (plain(ended), plain(late)) == (_ENDED, _ENDED)
 
 
 @pytest.mark.anyio
@@ -1044,8 +1041,8 @@ async def test_a_reply_judged_while_its_run_ended_is_refused() -> None:
     global _seen_tokyo
     _seen_tokyo = anyio.Event()
     handler = Handler(ends_at_tokyo_after_oslo_waits())
-    await handler.request(request("a", run="sample-1"))
-    await handler.request(request("b", "Another conversation", run="sample-1"))
+    await handler.request(request("a", sample="sample-1"))
+    await handler.request(request("b", "Another conversation", sample="sample-1"))
     answers: dict[str, Answer] = {}
 
     async def judge(id: str, city: str) -> None:
@@ -1055,7 +1052,10 @@ async def test_a_reply_judged_while_its_run_ended_is_refused() -> None:
         group.start_soon(judge, "a", "Oslo")
         group.start_soon(judge, "b", "Tokyo")
 
-    assert answers == {"a": _ENDED, "b": _ENDED}
+    assert {id: plain(answer) for id, answer in answers.items()} == {
+        "a": _ENDED,
+        "b": _ENDED,
+    }
 
 
 @pytest.mark.anyio
@@ -1063,12 +1063,12 @@ async def test_a_request_judged_while_its_run_ended_is_refused() -> None:
     global _seen_tokyo
     _seen_tokyo = anyio.Event()
     handler = Handler(ends_at_tokyo_after_oslo_waits())
-    await handler.request(request("a", run="sample-1"))
+    await handler.request(request("a", sample="sample-1"))
     answers: dict[str, Answer] = {}
 
     async def ask() -> None:
         answers["b"] = await handler.request(
-            request("b", "Weather in Oslo?", run="sample-1")
+            request("b", "Weather in Oslo?", sample="sample-1")
         )
 
     async def end() -> None:
@@ -1078,7 +1078,10 @@ async def test_a_request_judged_while_its_run_ended_is_refused() -> None:
         group.start_soon(ask)
         group.start_soon(end)
 
-    assert answers == {"a": _ENDED, "b": _ENDED}
+    assert {id: plain(answer) for id, answer in answers.items()} == {
+        "a": _ENDED,
+        "b": _ENDED,
+    }
 
 
 @pytest.mark.anyio
@@ -1178,10 +1181,10 @@ async def test_a_result_is_judged_in_each_conversation_it_reaches() -> None:
     # two conversations of one run, each holding the same call and result
     then = ran("Oslo", "Rain.")
 
-    await handler.request(request("a", "First conversation", then, run="run_1"))
-    await handler.request(request("b", "Second conversation", then, run="run_1"))
+    await handler.request(request("a", "First conversation", then, sample="run_1"))
+    await handler.request(request("b", "Second conversation", then, sample="run_1"))
     # and the first again, which has judged it
-    await handler.request(request("c", "First conversation", then, run="run_1"))
+    await handler.request(request("c", "First conversation", then, sample="run_1"))
 
     assert [len(await handler.records(id) or []) for id in "abc"] == [1, 1, 0]
 
@@ -1272,7 +1275,7 @@ async def test_a_request_that_waited_for_a_judgment_that_ended_the_run_is_refuse
     answers: dict[str, Answer] = {}
 
     async def ask(id: str) -> None:
-        answers[id] = await handler.request(request(id, then=then, run="run_1"))
+        answers[id] = await handler.request(request(id, then=then, sample="run_1"))
 
     async with anyio.create_task_group() as group:
         group.start_soon(ask, "a")

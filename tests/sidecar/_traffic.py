@@ -1,5 +1,6 @@
 import json
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -8,7 +9,7 @@ from inspect_sentinel._decorators import protocol
 from inspect_sentinel._report import Decision
 from inspect_sentinel._step import AfterToolCall, BeforeToolCall
 from inspect_sentinel._types import Protocol
-from inspect_sentinel.sidecar import Reply, Request
+from inspect_sentinel.sidecar import Refuse, Reply, Request
 
 DATA = Path(__file__).parent / "data"
 
@@ -87,13 +88,13 @@ def request(
     user_text: str = "What is the weather?",
     then: Sequence[dict[str, Any]] = (),
     *,
-    run: str | None = None,
+    sample: str | None = None,
     **fields: Any,
 ) -> Request:
-    """An Anthropic request as a proxy hands it over, its conversation followed by `then`."""
+    """An Anthropic request as a proxy hands it over, its conversation followed by `then`, from the Inspect sample whose uuid is `sample` if given."""
     return Request(
         id=id,
-        run=run,
+        headers=inspect_headers(sample_uuid=sample) if sample is not None else {},
         provider="anthropic",
         model="claude-test",
         user="user-1",
@@ -105,6 +106,30 @@ def request(
             }
         ).encode(),
     )
+
+
+SAMPLE: dict[str, Any] = {
+    "version": 1,
+    "eval_id": "eval_789",
+    "task": "philadelphia",
+    "sample_id": 1,
+    "epoch": 2,
+    "sample_uuid": "sample_123",
+    "attempt": "attempt_1",
+}
+
+
+def inspect_headers(**changes: Any) -> dict[str, str]:
+    """The headers an Inspect eval sends with each model request, for `SAMPLE` with `changes`."""
+    return {
+        "x-inspect-context": json.dumps(SAMPLE | changes),
+        "x-irid": "request_456",
+    }
+
+
+def plain(answer: object) -> object:
+    """An answer without the `sentinel` field, to compare what any client is told."""
+    return replace(answer, sentinel=None) if isinstance(answer, Refuse) else answer
 
 
 def reply(

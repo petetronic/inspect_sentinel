@@ -11,8 +11,10 @@ from inspect_ai.tool import ToolInfo
 from inspect_ai.util import Store
 from pydantic import JsonValue
 
+from .._context import ProxyContext
 from ._exchange import Refuse
 from ._host import ListRecorder, Record
+from ._inspect_client import Exchange
 from ._wire import Offered, Turn
 
 V = TypeVar("V")
@@ -90,13 +92,13 @@ class Run:
     """Rejected turns since a reply last passed."""
 
     refusal: Refuse | None = None
-    """What every later request is refused with, once a sentinel has ended a run the proxy named."""
+    """What every later request is refused with, once a sentinel has ended a run an eval names."""
 
     answered: set[str] = field(default_factory=set[str])
-    """For a run the proxy didn't name: the marks of the requests whose replies were passed on."""
+    """For a run no eval names: the marks of the requests whose replies were passed on."""
 
     ended_at: dict[str, Refuse] = field(default_factory=dict[str, Refuse])
-    """For a run the proxy didn't name: the marks of the requests the run was ended at, each with what a request that continues from it is refused with."""
+    """For a run no eval names: the marks of the requests the run was ended at, each with what a request that continues from it is refused with."""
 
 
 @dataclass(frozen=True)
@@ -106,7 +108,7 @@ class Held:
     run: str
     conversation: str
     named: bool
-    """Whether the proxy named the run."""
+    """Whether an eval named the run."""
     answered: bool
     """Whether the request continues one whose reply was passed on, so that it holds a turn the model wrote."""
     model: str
@@ -118,6 +120,10 @@ class Held:
     offered: Offered
     marks: list[str]
     """The request's marks, for each count of the entries the client sent, before anything was added."""
+    proxy: ProxyContext
+    """What the proxy said about the request."""
+    exchange: Exchange = field(default_factory=Exchange)
+    """What was decided so far during the exchange, for an Inspect client's `sentinel` field."""
 
     @property
     def sent(self) -> int:

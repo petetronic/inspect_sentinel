@@ -48,7 +48,6 @@ _REQUEST: dict[str, Any] = {
     "provider": "anthropic",
     "model": "claude-test",
     "user": "user-1",
-    "run": None,
     "headers": {},
     "body": {"messages": [{"role": "user", "content": "What is the weather?"}]},
 }
@@ -121,6 +120,45 @@ async def test_request_and_reply_are_judged(
     assert _fits(_SCHEMA["methods"]["judge_reply"]["result"], answered["result"])
 
 
+_FROM_INSPECT = {
+    # a proxy may pass the headers on as the client wrote them
+    "X-Inspect-Context": json.dumps(
+        {
+            "version": 1,
+            "eval_id": "eval_789",
+            "task": "philadelphia",
+            "sample_id": 1,
+            "epoch": 1,
+            "sample_uuid": "sample_123",
+            "attempt": "attempt_1",
+        }
+    ),
+}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("city", ["Oslo", "Tokyo"])
+async def test_an_inspect_client_is_told_what_was_decided(city: str) -> None:
+    async with _client() as client:
+        asked = await _call(
+            client, "judge_request", _REQUEST | {"headers": _FROM_INSPECT}
+        )
+        answered = await _call(client, "judge_reply", _reply(message(weather(city))))
+
+    assert asked["result"] == {"action": "pass"}
+    result = answered["result"]
+    assert _fits(_SCHEMA["methods"]["judge_reply"]["result"], result)
+    if city == "Oslo":
+        assert result["action"] == "replace"
+        field = json.loads(base64.b64decode(result["body"]))["sentinel"]
+    else:
+        assert result["action"] == "refuse"
+        field = result["sentinel"]
+    assert [step["decision"]["action"] for step in field["steps"]] == [
+        "proceed" if city == "Oslo" else "reject",
+    ]
+
+
 @pytest.mark.anyio
 async def test_request_that_carries_on_from_a_rejected_turn_is_replaced() -> None:
     async with _client() as client:
@@ -164,12 +202,12 @@ def reports_the_conversation() -> Protocol:
 
 
 @pytest.mark.anyio
-async def test_run_is_the_one_the_proxy_names() -> None:
+async def test_run_is_the_sample_the_eval_names() -> None:
     async with _client(Handler(reports_the_conversation())) as client:
-        await _call(client, "judge_request", _REQUEST | {"run": "sample-uuid"})
+        await _call(client, "judge_request", _REQUEST | {"headers": _FROM_INSPECT})
         answered = await _call(client, "judge_reply", _reply(message(weather("Oslo"))))
 
-    assert re.search(r": sample-uuid/[0-9a-f]{16}$", answered["result"]["message"])
+    assert re.search(r": sample_123/[0-9a-f]{16}$", answered["result"]["message"])
 
 
 @pytest.mark.anyio
@@ -188,7 +226,7 @@ async def test_request_can_be_refused() -> None:
 
 @pytest.mark.anyio
 async def test_run_that_a_sentinel_ended_is_refused_from_then_on() -> None:
-    named = {"run": "sample-uuid"}
+    named = {"headers": _FROM_INSPECT}
     refused = {
         "action": "refuse",
         "status": 400,
@@ -201,7 +239,11 @@ async def test_run_that_a_sentinel_ended_is_refused_from_then_on() -> None:
         later = await _call(client, "judge_request", _REQUEST | named | {"id": "y"})
         other = await _call(client, "judge_request", _REQUEST | {"id": "z"})
 
-    assert (ended["result"], later["result"]) == (refused, refused)
+    assert [
+        {key: value for key, value in result.items() if key != "sentinel"}
+        for result in (ended["result"], later["result"])
+    ] == [refused, refused]
+    assert later["result"]["sentinel"]["outcome"] == "terminate"
     assert other["result"] == {"action": "pass"}
 
 

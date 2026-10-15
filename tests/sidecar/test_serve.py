@@ -1,7 +1,9 @@
 import argparse
+import json
 import logging
 import threading
 import time
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -95,6 +97,7 @@ def test_defaults_are_one_port_and_no_limits() -> None:
     assert arguments.time_limit is None
     assert arguments.max_body_bytes == 64 * 1024 * 1024
     assert arguments.run_expiry == 24 * 60 * 60
+    assert arguments.no_eval_results is False
 
 
 @pytest.mark.anyio
@@ -117,6 +120,31 @@ async def test_handler_is_built_from_the_arguments() -> None:
     assert answer == Refuse(
         503, "A sentinel rejected the call to get_weather: Tokyo is not allowed."
     )
+
+
+@pytest.mark.anyio
+async def test_an_inspect_client_can_be_sent_only_what_it_acts_on() -> None:
+    handler = handler_from_arguments(
+        _arguments("--sentinel", "no_tokyo", "--no-eval-results")
+    )
+    sample = {
+        "version": 1,
+        "eval_id": "eval_789",
+        "task": "philadelphia",
+        "sample_id": 1,
+        "epoch": 1,
+        "sample_uuid": "sample_123",
+        "attempt": "attempt_1",
+    }
+    await handler.request(
+        replace(request(), headers={"x-inspect-context": json.dumps(sample)})
+    )
+
+    answer = await handler.reply(reply(message(weather("Tokyo"))))
+
+    assert isinstance(answer, Refuse)
+    assert answer.sentinel is not None
+    assert answer.sentinel["trimmed"] is True
 
 
 @pytest.mark.parametrize("role", ["monitor", "=mockllm/model", "monitor="])

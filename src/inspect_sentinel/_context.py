@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
@@ -49,14 +50,60 @@ class EvalContext:
 
 
 @dataclass(frozen=True, kw_only=True)
+class InspectSample:
+    """The Inspect sample a request says it is from, as its `x-inspect-context` header says. The client set the header, so this is its claim."""
+
+    eval_id: str
+    """The id of the eval, as its log records it."""
+
+    task: str
+    """The task's name."""
+
+    sample_id: str | int
+    """The sample's id in the dataset."""
+
+    epoch: int
+    """The epoch, from 1."""
+
+    sample_uuid: str
+    """The uuid the eval log gives the sample. It stays the same when Inspect retries the sample after an error."""
+
+    attempt: str
+    """Inspect's id for this attempt at the sample. A retry has a new one."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class ProxyContext:
+    """What a proxy says about the model request a step was found in. The caller set the headers, so with an agent that makes its own model calls, they came from the agent."""
+
+    provider: str
+    """Whose API the request is written for, e.g. `anthropic`."""
+
+    model: str
+    """The model, by the name the proxy shows for it."""
+
+    user: str | None
+    """Who the proxy signed the caller in as, if it says."""
+
+    headers: Mapping[str, str]
+    """The request headers the proxy passed on, by lowercase name."""
+
+    inspect: InspectSample | None
+    """The sample the request says it is from, when an Inspect eval sent it. Read it when `Context.eval` is None because the sample's task was not registered."""
+
+
+@dataclass(frozen=True, kw_only=True)
 class Context:
-    """What a monitor or protocol is given. Constant for a sample; nothing in it came from the agent."""
+    """What a monitor or protocol is given. Nothing in it came from the agent, except what `proxy` holds."""
 
     path: str
     """Instance path, e.g. `attempt/internet_attempt`. Empty at the top layer."""
 
     host: Host
     """Inference through the host's models, and asking a person. See `Host`."""
+
+    proxy: ProxyContext | None = None
+    """What a proxy says about the model request the step was found in, when the sentinel runs beside a proxy. None in an eval's own process."""
 
     @property
     def eval(self) -> EvalContext | None:

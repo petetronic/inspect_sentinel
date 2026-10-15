@@ -57,6 +57,11 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help="The longest the sentinel may take to judge one request or one reply, after which it is cancelled and the proxy is told it couldn't be judged. There is no limit by default: the sentinel finishes however long it takes.",
     )
     parser.add_argument(
+        "--no-eval-results",
+        action="store_true",
+        help="Send an Inspect eval only what it acts on: each step's stage, call and decision, without the explanations, references, metadata and records. A monitor's explanation tells an agent what the monitor looks for, so use this where the eval can't be trusted.",
+    )
+    parser.add_argument(
         "--max-body-bytes",
         type=int,
         default=MAX_BODY_BYTES,
@@ -93,6 +98,7 @@ def handler_from_arguments(arguments: argparse.Namespace) -> Handler:
         state=MemoryState(expiry=arguments.run_expiry),
         reject_status=arguments.reject_status,
         time_limit=arguments.time_limit,
+        eval_results=not arguments.no_eval_results,
     )
 
 

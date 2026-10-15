@@ -16,7 +16,7 @@ from ._score import score_step
 from ._step import Step
 
 if TYPE_CHECKING:
-    from ._context import Context, EvalContext
+    from ._context import Context, EvalContext, ProxyContext
     from ._excerpt import Excerpt
 
 
@@ -260,7 +260,7 @@ class Recorder(TypingProtocol):
 
 @dataclass(frozen=True, kw_only=True)
 class HostContext:
-    """What the host passes to `run_sentinel`: its `HostNative`, where the runner records reports, and the sample store.
+    """What the host passes to `run_sentinel`: its `HostNative`, where the runner records reports, the sample store, and, beside a proxy, what the proxy says about the request.
 
     It builds the top layer's `Context` from the host, with an empty `path` and a `Host` wrapping it. Monitors and protocols reach the store only through `Context.store_as()`, which namespaces it by their `path`; `Host.score` keeps the sample's nonce in it too.
     """
@@ -273,6 +273,9 @@ class HostContext:
 
     store: Store
     """The sample store that `Context.store_as()` and `Host.score` read and write while the step runs."""
+
+    proxy: ProxyContext | None = None
+    """What a proxy says about the model request the step was found in, for a host beside a proxy. None in an eval's own process."""
 
     def __post_init__(self) -> None:
         # a runtime check for hosts that are not type-checked against Recorder
@@ -287,7 +290,7 @@ class HostContext:
         # _context imports this module
         from ._context import Context
 
-        return Context(path="", host=Host(self.host))
+        return Context(path="", host=Host(self.host), proxy=self.proxy)
 
 
 @dataclass(frozen=True)

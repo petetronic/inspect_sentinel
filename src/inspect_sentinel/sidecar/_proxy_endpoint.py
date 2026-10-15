@@ -16,6 +16,7 @@ from starlette.routing import Route
 from ._exchange import Answer, Pass, Refuse, Reply, Request
 from ._handler import Handler, TimeLimitError
 from ._http import MAX_BODY_BYTES, health_route, read_within
+from ._inspect_client import SentinelField
 from ._json_rpc import (
     INVALID_PARAMS,
     INVALID_REQUEST,
@@ -51,10 +52,6 @@ class JudgeRequestParams(BaseModel):
     model: str = Field(description="The model, by the name the proxy shows for it.")
     user: str | None = Field(
         default=None, description="Who the proxy signed the caller in as."
-    )
-    run: str | None = Field(
-        default=None,
-        description="The run the request belongs to, where the proxy names runs in a way of its own. A sentinel's state is kept by run.",
     )
     headers: dict[str, str] = Field(
         default_factory=dict[str, str],
@@ -94,7 +91,7 @@ class ReplaceRequestResult(BaseModel):
 
 
 class ReplaceReplyResult(BaseModel):
-    """Send the caller this reply body in place of the provider's."""
+    """Send the caller this reply body in place of the provider's. An Inspect client's reply is always replaced, to add the `sentinel` field."""
 
     action: Literal["replace"] = "replace"
     body: str = Field(description="The reply's body, as base64.")
@@ -106,6 +103,10 @@ class RefuseResult(BaseModel):
     action: Literal["refuse"] = "refuse"
     status: int = Field(ge=400, le=599, description="The HTTP status of the error.")
     message: str = Field(description="What the caller is told.")
+    sentinel: SentinelField | None = Field(
+        default=None,
+        description="For an Inspect client: what was decided. The proxy hook puts it into the error it sends the caller, as a top-level `sentinel` field beside the error's own, without reading it.",
+    )
 
 
 _NOT_JUDGED = "A proxy hook refuses the call, unless its operator has chosen to let calls that weren't judged through."
@@ -215,8 +216,7 @@ def _request(given: JudgeRequestParams) -> Request:
         model=given.model,
         user=given.user,
         body=json.dumps(given.body).encode(),
-        headers=given.headers,
-        run=given.run,
+        headers={name.lower(): value for name, value in given.headers.items()},
     )
 
 
@@ -243,7 +243,15 @@ def _reply(given: JudgeReplyParams) -> Reply:
 
 def _result(answer: Answer, *, reply: bool) -> BaseModel:
     if isinstance(answer, Refuse):
-        return RefuseResult(status=answer.status, message=answer.message)
+        return RefuseResult(
+            status=answer.status,
+            message=answer.message,
+            sentinel=(
+                SentinelField.model_validate(answer.sentinel)
+                if answer.sentinel is not None
+                else None
+            ),
+        )
     if isinstance(answer, Pass):
         return PassResult()
     if reply:
