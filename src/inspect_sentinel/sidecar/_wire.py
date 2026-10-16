@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, TypeAlias, cast
 
 from inspect_ai.model import (
@@ -14,7 +14,7 @@ from inspect_ai.model import (
     GenerateConfig,
     ModelOutput,
 )
-from inspect_ai.tool import ToolCallError, ToolChoice, ToolInfo
+from inspect_ai.tool import ToolCall, ToolCallError, ToolChoice, ToolInfo
 from pydantic import JsonValue
 
 Format: TypeAlias = Literal["anthropic-messages", "openai-chat", "openai-responses"]
@@ -365,6 +365,184 @@ def json_object(body: bytes, what: str) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise UnreadableError(f"The {what} body is not a JSON object.")
     return cast("dict[str, Any]", parsed)
+
+
+@dataclass
+class StreamEvent:
+    """One event of a reply stream as it was written: its lines, each with the line end after it, and its data read as JSON."""
+
+    lines: list[tuple[str, str]]
+    data: dict[str, Any] | None
+    """The event's data, or None if it has none that is a JSON object, as for OpenAI's `[DONE]`."""
+    changed: bool = False
+    """Whether `data` was changed, so that the event is written out again."""
+
+
+# a line end, kept by the split
+_LINE_END_KEPT = re.compile(r"(\r\n|\r|\n)")
+
+
+def written_events(body: bytes) -> list[StreamEvent]:
+    """A reply stream's events as they were written, so that the events left unchanged go out again byte for byte.
+
+    Raises:
+        UnreadableError: If the stream is not UTF-8.
+    """
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError as ex:
+        raise UnreadableError("The reply stream is not UTF-8.") from ex
+    # each line with the line end after it, the last with none
+    parts = _LINE_END_KEPT.split(text)
+    lines = list(zip(parts[::2], [*parts[1::2], ""], strict=True))
+    events: list[StreamEvent] = []
+    held: list[tuple[str, str]] = []
+    for line, end in lines:
+        held.append((line, end))
+        # a blank line ends an event, and so does the end of the stream
+        if not line and any(written for written, _ in held[:-1]):
+            events.append(_event(held))
+            held = []
+    if held:
+        events.append(_event(held))
+    return events
+
+
+def _event(lines: list[tuple[str, str]]) -> StreamEvent:
+    payload = "\n".join(
+        line[5:].lstrip(" ") for line, _ in lines if line.startswith("data:")
+    )
+    try:
+        data: object = json.loads(payload) if payload else None
+    except ValueError:
+        # OpenAI's chat stream ends with an event that is not JSON
+        data = None
+    return StreamEvent(
+        lines, cast("dict[str, Any]", data) if isinstance(data, dict) else None
+    )
+
+
+def made_event(like: StreamEvent, data: dict[str, Any]) -> StreamEvent:
+    """A new event, written as `like` is: with an `event:` line naming its type if `like` has one, and `like`'s line end."""
+    end = like.lines[0][1] or "\n"
+    lines: list[tuple[str, str]] = []
+    if any(line.startswith("event:") for line, _ in like.lines):
+        lines.append((f"event: {data.get('type')}", end))
+    lines += [(f"data: {json.dumps(data)}", end), ("", end)]
+    return StreamEvent(lines, data)
+
+
+def write_events(events: Iterable[StreamEvent]) -> bytes:
+    """A reply stream from its events. An event whose data changed has its data written on one line; every other line goes out as it was."""
+    written: list[str] = []
+    for event in events:
+        first = True
+        for line, end in event.lines:
+            if not (event.changed and line.startswith("data:")):
+                written.append(line + end)
+            elif first:
+                written.append(f"data: {json.dumps(event.data)}{end}")
+                first = False
+    return "".join(written).encode()
+
+
+@dataclass(frozen=True)
+class Edits:
+    """What to change in a reply's tool calls before the client is handed it."""
+
+    removed: frozenset[str] = frozenset()
+    """The ids of the calls to take out."""
+    modified: Mapping[str, ToolCall] = field(default_factory=dict[str, ToolCall])
+    """The call to hand out in place of each call, by id. Only its arguments differ from the model's."""
+
+    @property
+    def targets(self) -> frozenset[str]:
+        """The ids of every call that is changed or taken out."""
+        return self.removed | self.modified.keys()
+
+
+def check_found(found: Iterable[str], edits: Edits) -> None:
+    """Refuse an edit that didn't find every call it changes in the reply.
+
+    Raises:
+        UnreadableError: If a call of `edits` was not found.
+    """
+    missing = edits.targets - set(found)
+    if missing:
+        raise UnreadableError(
+            f"The reply has no call this sidecar can change with the id {sorted(missing)[0]!r}."
+        )
+
+
+async def edit_reply(
+    provider: str,
+    content_type: str,
+    body: bytes,
+    format: Format | None,
+    edits: Edits,
+    output: ModelOutput,
+    *,
+    start: JsonValue | None = None,
+) -> bytes:
+    """Take tool calls out of a reply and change the arguments of others, as the provider wrote it, streamed or not.
+
+    The reply is edited as written, so every field inspect_ai doesn't read is kept, and in a stream every event the edit doesn't touch goes out byte for byte. The edited reply is then read back, and must read as the reply did with only the edits made.
+
+    Args:
+        provider: Whose API the body is written in.
+        content_type: The reply's `content-type`, which says whether the body is a stream.
+        body: The whole reply body.
+        format: Which API the body is written in, if the proxy said.
+        edits: The calls to take out, and the calls to change.
+        output: The reply as it was read.
+        start: What was noted while reading the conversation's earlier replies, as the reply was read with.
+
+    Raises:
+        UnreadableError: If a call can't be changed as asked, or the edited reply doesn't read back as the reply with the edits made.
+    """
+    from ._inspect_ai import noting
+
+    if format == "anthropic-messages" or (format is None and provider == "anthropic"):
+        from . import _anthropic
+
+        edited = _anthropic.edit_reply(content_type, body, edits)
+    elif format is not None or provider == "openai":
+        from . import _openai
+
+        edited = _openai.edit_reply(
+            content_type,
+            body,
+            None if format is None else format == "openai-chat",
+            edits,
+        )
+    else:
+        raise UnreadableError(f"There is no reader for provider {provider!r}.")
+    with noting(start):
+        read = await _read_reply(provider, content_type, edited, format)
+    _check_edited(output, read, edits)
+    return edited
+
+
+def _check_edited(output: ModelOutput, edited: ModelOutput, edits: Edits) -> None:
+    # The edited reply as read must be the reply as read, with the calls taken
+    # out and changed and nothing else different. A message is given a new id
+    # each time it is read.
+    if not output.choices or len(edited.choices) != 1:
+        raise UnreadableError("The edited reply doesn't read as one message.")
+    before, after = output.message, edited.message
+    intended = [
+        (call.id, call.function, edits.modified.get(call.id, call).arguments)
+        for call in before.tool_calls or []
+        if call.id not in edits.removed
+    ]
+    made = [(call.id, call.function, call.arguments) for call in after.tool_calls or []]
+    unchanged = {"id", "tool_calls"}
+    if (
+        made != intended
+        or after.model_dump(exclude=unchanged) != before.model_dump(exclude=unchanged)
+        or edited.stop_reason != output.stop_reason
+    ):
+        raise UnreadableError("The edited reply doesn't read back as intended.")
 
 
 def stream_events(body: bytes) -> Iterator[dict[str, Any]]:

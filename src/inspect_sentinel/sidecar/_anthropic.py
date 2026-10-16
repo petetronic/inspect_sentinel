@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from collections.abc import Sequence
 from typing import Any, cast
 
@@ -15,11 +16,17 @@ from inspect_ai.model import (
 
 from ._inspect_ai import anthropic_message
 from ._wire import (
+    Edits,
+    StreamEvent,
     UnreadableError,
+    check_found,
     check_internal,
     check_internal_kept,
     json_object,
+    made_event,
     stream_events,
+    write_events,
+    written_events,
 )
 
 # The content kinds that inspect_ai's Anthropic converter reads, in a reply or
@@ -115,6 +122,109 @@ async def rejected_turn(
     for result in results:
         blocks.extend(cast("list[Any]", (await anthropic_message(result))["content"]))
     return [await anthropic_message(message), {"role": "user", "content": blocks}]
+
+
+def edit_reply(content_type: str, body: bytes, edits: Edits) -> bytes:
+    """A reply with the `tool_use` blocks of `edits` taken out or given new input, streamed or not.
+
+    Raises:
+        UnreadableError: If the reply doesn't hold every call of `edits` as a `tool_use` block, or is a stream whose `message_start` already holds content.
+    """
+    if content_type.startswith("text/event-stream"):
+        return _edit_stream(written_events(body), edits)
+    reply = json_object(body, "reply")
+    content: object = reply.get("content")
+    if not isinstance(content, list):
+        raise UnreadableError("The reply has no list of content.")
+    found: list[str] = []
+    blocks: list[object] = []
+    for block in cast("list[object]", content):
+        call = _tool_use(block)
+        if call is None:
+            blocks.append(block)
+            continue
+        if call in edits.removed:
+            found.append(call)
+            continue
+        if call in edits.modified:
+            found.append(call)
+            block = {
+                **cast("dict[str, Any]", block),
+                "input": edits.modified[call].arguments,
+            }
+        blocks.append(block)
+    check_found(found, edits)
+    reply["content"] = blocks
+    return json.dumps(reply).encode()
+
+
+def _tool_use(block: object) -> str | None:
+    # the id of a call the client runs, which inspect_ai reads as a tool call
+    entry = cast("dict[str, Any]", block) if isinstance(block, dict) else {}
+    if entry.get("type") == "tool_use":
+        id: object = entry.get("id")
+        return id if isinstance(id, str) else None
+    return None
+
+
+def _edit_stream(events: list[StreamEvent], edits: Edits) -> bytes:
+    # each block is told apart by its index, which the later blocks' events
+    # are moved down by for each block taken out before them
+    removed: set[int] = set()
+    modified: dict[int, str] = {}
+    found: list[str] = []
+    for event in events:
+        data = event.data or {}
+        if data.get("type") == "message_start" and (
+            cast("dict[str, Any]", data.get("message") or {}).get("content")
+        ):
+            raise UnreadableError(
+                "The reply stream holds content in its message_start, which this sidecar can't change."
+            )
+        if data.get("type") != "content_block_start":
+            continue
+        call = _tool_use(data.get("content_block"))
+        index: object = data.get("index")
+        if call is not None and call in edits.targets and isinstance(index, int):
+            found.append(call)
+            if call in edits.removed:
+                removed.add(index)
+            else:
+                modified[index] = call
+    check_found(found, edits)
+    written: list[StreamEvent] = []
+    for event in events:
+        data = event.data or {}
+        index = data.get("index")
+        kind = str(data.get("type", ""))
+        if not kind.startswith("content_block_") or not isinstance(index, int):
+            written.append(event)
+            continue
+        if index in removed:
+            continue
+        if index in modified and kind == "content_block_delta":
+            # its input goes out whole, in one delta after its start
+            continue
+        moved = index - sum(1 for taken in removed if taken < index)
+        if moved != index:
+            data["index"] = moved
+            event.changed = True
+        if index in modified and kind == "content_block_start":
+            block = cast("dict[str, Any]", data["content_block"])
+            data["content_block"] = {**block, "input": {}}
+            event.changed = True
+            written.append(event)
+            arguments = edits.modified[modified[index]].arguments
+            delta = {"type": "input_json_delta", "partial_json": json.dumps(arguments)}
+            written.append(
+                made_event(
+                    event,
+                    {"type": "content_block_delta", "index": moved, "delta": delta},
+                )
+            )
+            continue
+        written.append(event)
+    return write_events(written)
 
 
 def settled(entry: object) -> object:

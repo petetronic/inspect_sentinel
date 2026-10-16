@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 from inspect_ai.model import ChatMessageAssistant
 from inspect_ai.tool import ToolCall
@@ -13,7 +12,13 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 from .._context import InspectSample
 from .._report import Decision, Failed, Reported
 from ._host import Record, Stage
-from ._wire import UnreadableError, json_object
+from ._wire import (
+    StreamEvent,
+    UnreadableError,
+    json_object,
+    write_events,
+    written_events,
+)
 
 INSPECT_CONTEXT = "x-inspect-context"
 """The header an Inspect eval names the sample of each model request in."""
@@ -23,7 +28,6 @@ INSPECT_CONTEXT = "x-inspect-context"
 _LAST_EVENTS = frozenset(
     {"message_delta", "response.completed", "response.incomplete", "response.failed"}
 )
-_LINE_END = re.compile(r"(\r\n|\r|\n)")
 _TOOL_CALL = TypeAdapter(ToolCall)
 
 
@@ -214,57 +218,27 @@ def with_sentinel(content_type: str, body: bytes, field: Mapping[str, Any]) -> b
         reply = json_object(body, "reply")
         reply["sentinel"] = field
         return json.dumps(reply).encode()
-    try:
-        text = body.decode("utf-8")
-    except UnicodeDecodeError as ex:
-        raise UnreadableError("The reply stream is not UTF-8.") from ex
-    # each line with the line end after it, the last with none
-    parts = _LINE_END.split(text)
-    lines = list(zip(parts[::2], [*parts[1::2], ""], strict=True))
-    target = _last_event(lines)
+    events = written_events(body)
+    target = _last_event(events)
     if target is None:
         raise UnreadableError("The reply stream has no event the field can go in.")
-    first, event, rest = target
-    event["sentinel"] = field
-    written: list[str] = []
-    for index, (line, end) in enumerate(lines):
-        if index == first:
-            # the event's data, once, on one line
-            written.append(f"data: {json.dumps(event)}{end}")
-        elif index not in rest:
-            written.append(line + end)
-    return "".join(written).encode()
+    assert target.data is not None
+    target.data["sentinel"] = field
+    target.changed = True
+    return write_events(events)
 
 
-def _last_event(
-    lines: list[tuple[str, str]],
-) -> tuple[int, dict[str, Any], set[int]] | None:
-    # the event the field goes in: where its first data line is, the event,
-    # and where its other data lines are
-    found: tuple[int, dict[str, Any], set[int]] | None = None
-    chunk: tuple[int, dict[str, Any], set[int]] | None = None
-    data: list[int] = []
-    for index, (line, _) in enumerate([*lines, ("", "")]):
-        if line.startswith("data:"):
-            data.append(index)
+def _last_event(events: list[StreamEvent]) -> StreamEvent | None:
+    # the event the field goes in
+    found: StreamEvent | None = None
+    chunk: StreamEvent | None = None
+    for event in events:
+        if event.data is None:
             continue
-        if line or not data:
-            continue
-        held, data = data, []
-        payload = "\n".join(lines[i][0][5:].lstrip(" ") for i in held)
-        try:
-            event: object = json.loads(payload)
-        except ValueError:
-            # OpenAI's chat stream ends with an event that is not JSON
-            continue
-        if not isinstance(event, dict):
-            continue
-        event = cast("dict[str, Any]", event)
-        where = (held[0], event, set(held[1:]))
-        if event.get("type") in _LAST_EVENTS:
-            found = where
-        elif event.get("object") == "chat.completion.chunk":
-            chunk = where
+        if event.data.get("type") in _LAST_EVENTS:
+            found = event
+        elif event.data.get("object") == "chat.completion.chunk":
+            chunk = event
     return found if found is not None else chunk
 
 
