@@ -61,7 +61,7 @@ from ._state import (
 )
 from ._wire import (
     UnreadableError,
-    add_rejections,
+    amend_request,
     call_texts,
     offered,
     read_opening,
@@ -421,10 +421,10 @@ class Handler:
             if rejected.sent < len(marks) and marks[rejected.sent] == rejected.mark
             if (turns := [t for t in rejected.turns if _digest(t[0]) not in holds])
         }
-        if told:
-            body = await add_rejections(
-                request.provider, request.body, told, request.format
-            )
+        body = await amend_request(
+            request.provider, request.body, inserted=told, format=request.format
+        )
+        if body is not None:
             messages = await read_request(
                 request.provider, body, request.format, start=conversation.noted
             )

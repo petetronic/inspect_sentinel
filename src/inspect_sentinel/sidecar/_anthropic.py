@@ -17,6 +17,7 @@ from inspect_ai.model import (
 from ._inspect_ai import anthropic_message
 from ._wire import (
     Edits,
+    Spliced,
     StreamEvent,
     UnreadableError,
     check_found,
@@ -225,6 +226,94 @@ def _edit_stream(events: list[StreamEvent], edits: Edits) -> bytes:
             continue
         written.append(event)
     return write_events(written)
+
+
+def turn_at(entries: list[Any], sent: int) -> Spliced | None:
+    # the assistant message at `sent`, and the user message after it that
+    # holds the results of its calls
+    turn: object = entries[sent] if sent < len(entries) else None
+    if not isinstance(turn, dict):
+        return None
+    message = cast("dict[str, Any]", turn)
+    content: object = message.get("content")
+    if message.get("role") != "assistant" or not isinstance(content, list):
+        return None
+    after: object = entries[sent + 1] if sent + 1 < len(entries) else None
+    following = cast("dict[str, Any]", after) if isinstance(after, dict) else None
+    results: list[Any] = []
+    if following is not None and following.get("role") == "user":
+        said: object = following.get("content")
+        if isinstance(said, list):
+            results = list(cast("list[Any]", said))
+        elif isinstance(said, str) and said:
+            results = [{"type": "text", "text": said}]
+    else:
+        following = None
+
+    def rebuild(calls: list[Any], told: list[Any]) -> list[Any]:
+        written: list[Any] = [{**message, "content": calls}]
+        if following is not None:
+            written.append({**following, "content": told})
+        elif told:
+            written.append({"role": "user", "content": told})
+        return written
+
+    return Spliced(
+        sent,
+        sent + (2 if following is not None else 1),
+        list(cast("list[Any]", content)),
+        results,
+        rebuild,
+    )
+
+
+def call_ids(entry: object) -> list[str]:
+    message = cast("dict[str, Any]", entry) if isinstance(entry, dict) else {}
+    content: object = message.get("content")
+    if message.get("role") != "assistant" or not isinstance(content, list):
+        return []
+    return [id for block in cast("list[object]", content) if (id := _tool_use(block))]
+
+
+def call_of(element: object) -> tuple[str | None, str | None, object]:
+    id = _tool_use(element)
+    if id is None:
+        return None, None, None
+    block = cast("dict[str, Any]", element)
+    return id, block.get("name"), block.get("input")
+
+
+def result_of(element: object) -> tuple[str | None, str, bool]:
+    block = cast("dict[str, Any]", element) if isinstance(element, dict) else {}
+    if block.get("type") != "tool_result":
+        return None, "", False
+    content: object = block.get("content")
+    text = (
+        "".join(
+            str(cast("dict[str, Any]", part).get("text", ""))
+            for part in cast("list[object]", content)
+            if isinstance(part, dict)
+        )
+        if isinstance(content, list)
+        else str(content or "")
+    )
+    return block.get("tool_use_id"), text, bool(block.get("is_error"))
+
+
+def pick(rendered: list[Any], id: str) -> tuple[Any, tuple[Any, ...]]:
+    # a call's block, and its result's, from a turn inspect_ai wrote
+    blocks = cast("list[Any]", cast("dict[str, Any]", rendered[0])["content"])
+    call = next(block for block in blocks if _tool_use(block) == id)
+    told: list[Any] = []
+    for message in rendered[1:]:
+        content: object = cast("dict[str, Any]", message).get("content")
+        if isinstance(content, list):
+            told += [
+                block
+                for block in cast("list[Any]", content)
+                if result_of(block)[0] == id
+            ]
+    return call, tuple(told)
 
 
 def settled(entry: object) -> object:

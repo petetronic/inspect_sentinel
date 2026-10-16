@@ -21,6 +21,7 @@ from inspect_ai.model import (
 from ._inspect_ai import internal_text, is_assistant_item, without_reasoning
 from ._wire import (
     Edits,
+    Spliced,
     StreamEvent,
     UnreadableError,
     check_found,
@@ -618,6 +619,155 @@ def _whole(part: dict[str, Any]) -> bool:
         case _:
             return True
     return isinstance(source, str) and source != ""
+
+
+def chat_turn_at(entries: list[Any], sent: int) -> Spliced | None:
+    # the assistant message at `sent`, and the tool messages after it
+    turn: object = entries[sent] if sent < len(entries) else None
+    if not isinstance(turn, dict):
+        return None
+    message = cast("dict[str, Any]", turn)
+    calls: object = message.get("tool_calls")
+    if message.get("role") != "assistant" or not isinstance(calls, list):
+        return None
+    end = sent + 1
+    while (
+        end < len(entries)
+        and isinstance(entries[end], dict)
+        and cast("dict[str, Any]", entries[end]).get("role") == "tool"
+    ):
+        end += 1
+
+    def rebuild(held: list[Any], told: list[Any]) -> list[Any]:
+        return [{**message, "tool_calls": held}, *told]
+
+    return Spliced(
+        sent,
+        end,
+        list(cast("list[Any]", calls)),
+        list(entries[sent + 1 : end]),
+        rebuild,
+    )
+
+
+def chat_call_ids(entry: object) -> list[str]:
+    message = cast("dict[str, Any]", entry) if isinstance(entry, dict) else {}
+    calls: object = message.get("tool_calls")
+    if message.get("role") != "assistant" or not isinstance(calls, list):
+        return []
+    return [id for call in cast("list[object]", calls) if (id := _id(call, "id"))]
+
+
+def chat_call_of(element: object) -> tuple[str | None, str | None, object]:
+    id = _id(element, "id")
+    if id is None:
+        return None, None, None
+    function: object = cast("dict[str, Any]", element).get("function")
+    entry = cast("dict[str, Any]", function) if isinstance(function, dict) else {}
+    return id, entry.get("name"), _parsed(entry.get("arguments"))
+
+
+def chat_result_of(element: object) -> tuple[str | None, str, bool]:
+    message = cast("dict[str, Any]", element) if isinstance(element, dict) else {}
+    if message.get("role") != "tool":
+        return None, "", False
+    return _id(message, "tool_call_id"), _text(message.get("content")), False
+
+
+def chat_pick(rendered: list[Any], id: str) -> tuple[Any, tuple[Any, ...]]:
+    calls = cast("list[Any]", cast("dict[str, Any]", rendered[0])["tool_calls"])
+    call = next(call for call in calls if _id(call, "id") == id)
+    told = [message for message in rendered[1:] if chat_result_of(message)[0] == id]
+    return call, tuple(told)
+
+
+def responses_turn_at(entries: list[Any], sent: int) -> Spliced | None:
+    # the items of the assistant's turn from `sent`, and the outputs after
+    # them
+    end = sent
+    while end < len(entries) and _in_turn(entries[end]):
+        end += 1
+    if end == sent:
+        return None
+    last = end
+    while last < len(entries) and _is_output(entries[last]):
+        last += 1
+
+    def rebuild(held: list[Any], told: list[Any]) -> list[Any]:
+        return [*held, *told]
+
+    return Spliced(
+        sent, last, list(entries[sent:end]), list(entries[end:last]), rebuild
+    )
+
+
+def _in_turn(item: object) -> bool:
+    if not isinstance(item, dict):
+        return False
+    entry = cast("dict[str, Any]", item)
+    return is_assistant_item(entry) or _call_id(entry) is not None
+
+
+def _is_output(item: object) -> bool:
+    return isinstance(item, dict) and str(
+        cast("dict[str, Any]", item).get("type", "")
+    ).endswith("_output")
+
+
+def responses_call_ids(entry: object) -> list[str]:
+    id = _call_id(entry)
+    return [id] if id is not None else []
+
+
+def responses_call_of(element: object) -> tuple[str | None, str | None, object]:
+    id = _call_id(element)
+    if id is None:
+        return None, None, None
+    item = cast("dict[str, Any]", element)
+    if item.get("type") == "function_call":
+        return id, item.get("name"), _parsed(item.get("arguments"))
+    return id, item.get("name"), item.get("input", item.get("action"))
+
+
+def responses_result_of(element: object) -> tuple[str | None, str, bool]:
+    if not _is_output(element):
+        return None, "", False
+    item = cast("dict[str, Any]", element)
+    return _id(item, "call_id"), _text(item.get("output")), False
+
+
+def responses_pick(rendered: list[Any], id: str) -> tuple[Any, tuple[Any, ...]]:
+    call = next(item for item in rendered if _call_id(item) == id)
+    told = [item for item in rendered if responses_result_of(item)[0] == id]
+    # and the message that says why, for a computer call
+    told += [
+        item
+        for item in rendered
+        if isinstance(item, dict)
+        and cast("dict[str, Any]", item).get("role") == "user"
+        and _text(cast("dict[str, Any]", item).get("content")).startswith(f"{id}: ")
+    ]
+    return call, tuple(told)
+
+
+def _parsed(arguments: object) -> object:
+    # arguments as JSON says them, so that two writings of the same are equal
+    if isinstance(arguments, str):
+        try:
+            return json.loads(arguments)
+        except ValueError:
+            return arguments
+    return arguments
+
+
+def _text(content: object) -> str:
+    if isinstance(content, list):
+        return "".join(
+            str(cast("dict[str, Any]", part).get("text", ""))
+            for part in cast("list[object]", content)
+            if isinstance(part, dict)
+        )
+    return str(content or "")
 
 
 async def chat_rejected_turn(
