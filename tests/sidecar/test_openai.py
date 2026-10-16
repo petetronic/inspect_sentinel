@@ -28,12 +28,12 @@ from tests.sidecar._traffic import (
     JSON,
     OPENAI_RECORDED,
     STREAM,
+    every_call_rule,
     inspect_headers,
     openai_ran,
     openai_recorded,
     openai_request,
     storm_rule,
-    weather_rule,
 )
 
 
@@ -453,20 +453,24 @@ def _conversation(api: str, body: bytes) -> list[dict[str, Any]]:
             # says it in the text
             [
                 "Error: " + text
-                for text in ("not run", "Tokyo is not allowed.", "not run")
+                for text in (
+                    "Paris is not allowed.",
+                    "Tokyo is not allowed.",
+                    "Lima is not allowed.",
+                )
             ],
         ),
         (
             "responses",
             ["reasoning", *["function_call"] * 3, *["function_call_output"] * 3],
-            ["not run", "Tokyo is not allowed.", "not run"],
+            ["Paris is not allowed.", "Tokyo is not allowed.", "Lima is not allowed."],
         ),
     ],
 )
 async def test_rejection_is_added_in_the_format_of_the_request(
     api: str, kinds: list[str], told: list[str]
 ) -> None:
-    handler = Handler(weather_rule("reject", "Tokyo"), reject_status=503)
+    handler = Handler(every_call_rule(), reject_status=503)
     first = _request(api, "a")
     await handler.request(first)
 
@@ -474,7 +478,7 @@ async def test_rejection_is_added_in_the_format_of_the_request(
     again = await handler.request(_request(api, "b"))
 
     assert refused == Refuse(
-        503, "A sentinel rejected the call to get_weather: Tokyo is not allowed."
+        503, "A sentinel rejected the call to get_weather: Paris is not allowed."
     )
     assert isinstance(again, Replace)
     sent, added = _conversation(api, first.body), _conversation(api, again.body)
@@ -482,10 +486,7 @@ async def test_rejection_is_added_in_the_format_of_the_request(
     entries = added[len(sent) :]
     assert [entry.get("type") or entry["role"] for entry in entries] == kinds
     results = [entry.get("content") or entry.get("output") for entry in entries][-3:]
-    not_run = (
-        "This call was not run, because another call in the same turn was rejected."
-    )
-    assert results == [text.replace("not run", not_run) for text in told]
+    assert results == told
     # everything else in the request is as the client sent it
     field = "messages" if api == "chat" else "input"
     assert {k: v for k, v in json.loads(again.body).items() if k != field} == {
@@ -671,11 +672,11 @@ async def test_a_chat_custom_tool_makes_the_request_unreadable() -> None:
 
 
 @protocol
-def rejects_tokyo_and_ends_at_any_result() -> ProtocolGroup:
+def rejects_every_call_and_ends_at_any_result() -> ProtocolGroup:
     async def before(context: Context, step: BeforeToolCall) -> Decision | None:
-        if step.call.arguments.get("location") == "Tokyo":
-            return Decision.reject("Tokyo", message="Tokyo is not allowed.")
-        return Decision.proceed()
+        # every call, so that the turn is refused whole and added to the next
+        # request
+        return Decision.reject("any", message="Not allowed.")
 
     async def after(context: Context, step: AfterToolCall) -> Decision | None:
         return Decision.terminate("a result")
@@ -688,7 +689,7 @@ def rejects_tokyo_and_ends_at_any_result() -> ProtocolGroup:
 async def test_what_the_model_is_told_of_a_rejection_is_not_judged_as_a_result(
     api: str,
 ) -> None:
-    handler = Handler(rejects_tokyo_and_ends_at_any_result())
+    handler = Handler(rejects_every_call_and_ends_at_any_result())
     await handler.request(_request(api, "a"))
     await handler.reply(_reply(api, "a"))
 
@@ -708,7 +709,7 @@ def _function_calls(body: bytes) -> list[tuple[str, str, str]]:
 
 @pytest.mark.anyio
 async def test_a_rejected_turn_is_put_back_as_its_own_run_was_handed_it() -> None:
-    handler = Handler(weather_rule("reject", "Tokyo"))
+    handler = Handler(every_call_rule())
     await handler.request(
         replace(
             _request("responses", "a"), headers=inspect_headers(sample_uuid="run_a")

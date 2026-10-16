@@ -11,6 +11,7 @@ from inspect_ai.model import (
     ChatMessage,
     ChatMessageAssistant,
     ChatMessageTool,
+    ModelOutput,
 )
 from inspect_ai.tool import ToolCall, ToolCallView
 from pydantic import JsonValue
@@ -60,13 +61,18 @@ from ._state import (
     occurrence,
 )
 from ._wire import (
+    Edited,
+    Edits,
     UnreadableError,
     amend_request,
+    amendments,
     call_texts,
+    edit_reply,
     offered,
     read_opening,
     read_reply_noted,
     read_request,
+    request_format,
     request_marks,
 )
 
@@ -212,7 +218,7 @@ class Handler:
     async def reply(self, reply: Reply) -> Answer:
         """Judge a reply before the proxy passes any of it on.
 
-        The reply is put to the sentinel as an `AfterGenerate` step, then each tool call in it as a `BeforeToolCall` step, in order, leaving out a stage nothing in the sentinel watches. Every call is judged, as in Inspect's own process, unless one ends the run. A turn with a rejected call is refused whole, and its rejections are kept for the later requests of its conversation. The third rejected turn in a row ends the run. A provider's error is passed on unjudged.
+        The reply is put to the sentinel as an `AfterGenerate` step, then each tool call in it as a `BeforeToolCall` step, in order, leaving out a stage nothing in the sentinel watches. Every call is judged, as in Inspect's own process, unless one ends the run. The rejected calls are taken out of the reply and the rest of the turn goes on, answered with `Replace`, as the other calls of a turn still run in Inspect's own process. Each later request of the conversation that holds the turn has the calls taken out put back, each with its rejection as its result. A turn whose every call is rejected is refused whole, as is one that can't be edited, and its rejections are added to the later requests of its conversation. The third turn refused whole in a row ends the run; a turn in which a call ran starts the count again. A provider's error is passed on unjudged.
 
         For an Inspect client, a reply that goes on is answered with `Replace`, the reply with the `sentinel` field added, and a refusal carries the field. The field holds every step judged during the exchange, the request's first.
 
@@ -242,6 +248,7 @@ class Handler:
             attempt.not_judged("provider_error")
         elif not isinstance(answer, Refuse):
             attempt.decide("proceed")
+            attempt.proposed = held.exchange.proposed
         elif _ended(await self._state.run(held.run), held.marks) is not None:
             attempt.decide("terminate")
             attempt.withheld = held.exchange.withheld
@@ -421,14 +428,26 @@ class Handler:
             if rejected.sent < len(marks) and marks[rejected.sent] == rejected.mark
             if (turns := [t for t in rejected.turns if _digest(t[0]) not in holds])
         }
-        body = await amend_request(
-            request.provider, request.body, inserted=told, format=request.format
+        edited = [
+            turn
+            for turn in conversation.edited
+            if turn.sent < len(marks) and marks[turn.sent] == turn.mark
+        ]
+        amended = await amend_request(
+            request.provider,
+            request.body,
+            inserted=told,
+            edited=edited,
+            format=request.format,
         )
-        if body is not None:
+        if amended.body is not None:
             messages = await read_request(
-                request.provider, body, request.format, start=conversation.noted
+                request.provider,
+                amended.body,
+                request.format,
+                start=conversation.noted,
             )
-            answer = Replace(body)
+            answer = Replace(amended.body)
 
         held = Held(
             run=key,
@@ -436,6 +455,7 @@ class Handler:
             named=named,
             answered=any(mark in run.answered for mark in marks[:-1]),
             model=_model(request.provider, request.model),
+            format=request_format(request.provider, request.body, request.format),
             recorder=await self._state.recorder(request.id),
             input=messages,
             calls=_calls(client),
@@ -445,7 +465,9 @@ class Handler:
             attempt=attempt,
         )
         said = call_texts(request.provider, request.body, request.format)
-        ended = await self._results(held, run, conversation, client, said)
+        ended = await self._results(
+            held, run, conversation, client, said, amended.restored
+        )
         if ended is not None:
             return self._with_field(ended, proxy, held.exchange, run)
         if BeforeGenerate in self._watched:
@@ -481,6 +503,7 @@ class Handler:
         conversation: Conversation,
         client: list[ChatMessage],
         said: Mapping[str, Sequence[str]],
+        restored: frozenset[str] = frozenset(),
     ) -> Refuse | None:
         if AfterToolCall not in self._watched:
             return None
@@ -531,7 +554,9 @@ class Handler:
                 refusal = _ended(run, held.marks)
                 if refusal is not None:
                     return refusal
-            if digest in conversation.judged:
+            # a rejection the client put back itself is the sidecar's own
+            # writing, not the result of a call that ran
+            if digest in conversation.judged or entry.tool_call_id in restored:
                 continue
             sent = conversation.made.get(occurrence(call.id, index))
             step = AfterToolCall(
@@ -584,6 +609,8 @@ class Handler:
             )
         run = await self._state.run(held.run)
         conversation = run.conversations.setdefault(held.conversation, Conversation())
+        # what the reply is read from, which an edit of it is read back from
+        start = conversation.noted
         output, noted = await read_reply_noted(
             reply.provider,
             reply.content_type,
@@ -647,7 +674,17 @@ class Handler:
         if refusal is not None:
             return refusal
         if rejected:
-            return self._reject(held, run, conversation, message, noted, rejected)
+            taken = {call.id for call, _ in rejected}
+            if all(call.id in taken for call in message.tool_calls or []):
+                return self._reject(held, run, conversation, message, noted, rejected)
+            try:
+                return await self._edit(
+                    reply, held, run, conversation, output, start, noted, rejected
+                )
+            except UnreadableError:
+                # the reply couldn't be edited as the sentinel decided, so the
+                # turn is refused whole, as it was before calls could be taken out
+                return self._reject(held, run, conversation, message, noted, rejected)
         return self._passed(held, run, conversation, message)
 
     def _passed(
@@ -675,6 +712,56 @@ class Handler:
             while len(conversation.made) > MADE_KEPT:
                 del conversation.made[next(iter(conversation.made))]
         return Pass()
+
+    async def _edit(
+        self,
+        reply: Reply,
+        held: Held,
+        run: Run,
+        conversation: Conversation,
+        output: ModelOutput,
+        start: JsonValue | None,
+        noted: JsonValue | None,
+        rejected: Sequence[tuple[ToolCall, Decision]],
+    ) -> Replace:
+        # the rejected calls are taken out and the rest of the turn goes on, as
+        # in Inspect's own process, where the other calls in a turn still run
+        message = output.message
+        reasons = {
+            call.id: decision.message or _REJECTED for call, decision in rejected
+        }
+        written = await amendments(held.format, message, reasons, (), noted)
+        body = await edit_reply(
+            reply.provider,
+            reply.content_type,
+            reply.body,
+            reply.format,
+            Edits(frozenset(reasons)),
+            output,
+            start=start,
+        )
+        conversation.edited.append(
+            Edited(
+                sent=held.sent,
+                mark=held.mark,
+                order=tuple(call.id for call in message.tool_calls or []),
+                taken_out=reasons,
+                originals={},
+                modified={},
+                amendments=written,
+            )
+        )
+        held.exchange.proposed = Withheld(message, reasons)
+        handed = message.model_copy(
+            update={
+                "tool_calls": [
+                    call for call in message.tool_calls or [] if call.id not in reasons
+                ]
+            }
+        )
+        # some of the turn ran, which is progress, so it counts as a pass
+        self._passed(held, run, conversation, handed)
+        return Replace(body)
 
     def _reject(
         self,
@@ -762,6 +849,7 @@ class Handler:
     def _end(self, held: Held, run: Run, where: str) -> Refuse:
         for conversation in run.conversations.values():
             conversation.rejected.clear()
+            conversation.edited.clear()
         run.in_a_row = 0
         refusal = Refuse(400, f"A sentinel ended this run {where}.")
         if held.named:

@@ -27,6 +27,7 @@ from tests.sidecar._traffic import (
     SAMPLE,
     STREAM,
     anthropic_recorded,
+    every_call_rule,
     inspect_headers,
     message,
     openai_recorded,
@@ -173,14 +174,15 @@ async def test_a_stream_carries_the_field_in_its_last_event_the_sdk_reads(
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("name", _EXCHANGES)
-async def test_a_refused_turn_carries_the_rejected_call_and_what_was_recorded(
+async def test_a_refused_turn_carries_the_rejected_calls_and_what_was_recorded(
     name: str,
 ) -> None:
     asked, answered = _exchange(name)
     output = await read_reply(answered.provider, answered.content_type, answered.body)
+    calls = output.message.tool_calls or []
     # the recorded streams name the cities in more than one way
-    city = (output.message.tool_calls or [])[1].arguments["location"]
-    handler = Handler(weather_rule("reject", city))
+    cities = [call.arguments["location"] for call in calls]
+    handler = Handler(every_call_rule())
     await handler.request(asked)
 
     answer = await handler.reply(answered)
@@ -188,45 +190,73 @@ async def test_a_refused_turn_carries_the_rejected_call_and_what_was_recorded(
     assert isinstance(answer, Refuse)
     assert answer.sentinel is not None
     assert answer.sentinel["outcome"] == "reject"
-    assert _stages(dict(answer.sentinel)) == [
-        ("tool_call", "proceed"),
-        ("tool_call", "reject"),
-        ("tool_call", "proceed"),
-    ]
+    assert _stages(dict(answer.sentinel)) == [("tool_call", "reject")] * 3
     # the whole turn is withheld, every call in it, with what the model is told
     # of each when the sidecar adds it to the next request
     withheld = answer.sentinel["withheld"]
-    calls = output.message.tool_calls or []
     assert [call["id"] for call in withheld["message"]["tool_calls"]] == [
         call.id for call in calls
     ]
     assert withheld["message"]["role"] == "assistant"
     assert withheld["results"] == {
-        calls[
-            0
-        ].id: "This call was not run, because another call in the same turn was rejected.",
-        calls[1].id: f"{city} is not allowed.",
-        calls[
-            2
-        ].id: "This call was not run, because another call in the same turn was rejected.",
+        call.id: f"{city} is not allowed."
+        for call, city in zip(calls, cities, strict=True)
     }
     rejected = answer.sentinel["steps"][1]
     assert rejected["original"]["function"] == "get_weather"
-    assert rejected["original"]["arguments"] == {"location": city}
+    assert rejected["original"]["arguments"] == {"location": cities[1]}
     assert rejected["original"]["id"] == rejected["call"]
     assert rejected["decision"] == {
         "action": "reject",
-        "explanation": f"lookup of {city}",
-        "message": f"{city} is not allowed.",
+        "explanation": f"lookup of {cities[1]}",
+        "message": f"{cities[1]} is not allowed.",
     }
     assert [
         (record["kind"], record["path"], record["name"], record["call"])
         for record in rejected["recorded"]
-    ] == [("record", "", "weather_rule", rejected["call"])]
+    ] == [("record", "", "every_call_rule", rejected["call"])]
     assert rejected["recorded"][0]["report"] == rejected["decision"]
-    # only a rejected call has an original
-    assert "original" not in answer.sentinel["steps"][0]
-    assert "original" not in answer.sentinel["steps"][2]
+    # every call the client is not handed has its original
+    assert all("original" in step for step in answer.sentinel["steps"])
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("name", _EXCHANGES)
+async def test_a_turn_with_a_call_taken_out_carries_what_the_model_proposed(
+    name: str,
+) -> None:
+    asked, answered = _exchange(name)
+    output = await read_reply(answered.provider, answered.content_type, answered.body)
+    calls = output.message.tool_calls or []
+    city = calls[1].arguments["location"]
+    handler = Handler(weather_rule("reject", city))
+    await handler.request(asked)
+
+    answer = await handler.reply(answered)
+
+    # the turn goes on without the rejected call
+    assert isinstance(answer, Replace)
+    handed = await read_reply(answered.provider, answered.content_type, answer.body)
+    assert [call.id for call in handed.message.tool_calls or []] == [
+        calls[0].id,
+        calls[2].id,
+    ]
+    field = _field(answered.content_type, answer.body)
+    assert field["outcome"] == "proceed"
+    assert _stages(field) == [
+        ("tool_call", "proceed"),
+        ("tool_call", "reject"),
+        ("tool_call", "proceed"),
+    ]
+    assert field["steps"][1]["original"]["arguments"] == {"location": city}
+    # the turn as the model proposed it, for the eval to put back what was
+    # taken out
+    proposed = field["proposed"]
+    assert [call["id"] for call in proposed["message"]["tool_calls"]] == [
+        call.id for call in calls
+    ]
+    assert proposed["results"] == {calls[1].id: f"{city} is not allowed."}
+    assert "withheld" not in field
 
 
 @pytest.mark.anyio
@@ -510,7 +540,7 @@ async def test_a_provider_error_goes_on_as_it_was() -> None:
 
 @pytest.mark.anyio
 async def test_without_eval_results_only_what_inspect_acts_on_is_sent() -> None:
-    handler = Handler(weather_rule("reject", "Tokyo"), eval_results=False)
+    handler = Handler(every_call_rule(), eval_results=False)
     asked, answered = _exchange("anthropic")
     await handler.request(asked)
 
@@ -554,3 +584,81 @@ def test_a_stream_keeps_its_line_ends_and_each_events_other_lines() -> None:
 def test_a_stream_with_no_event_for_the_field_cant_carry_it() -> None:
     with pytest.raises(UnreadableError, match="no event"):
         with_sentinel(STREAM, b'data: {"type": "ping"}\n\n', {"version": 1})
+
+
+@protocol
+def rejects_tokyo_and_ends_at_its_result() -> ProtocolGroup:
+    """Reject a lookup of Tokyo, and end the run if a result for one is ever judged, as a call that never ran has none."""
+
+    async def before(context: Context, step: BeforeToolCall) -> Decision | None:
+        if step.call.arguments.get("location") == "Tokyo":
+            return Decision.reject("Tokyo", message="Tokyo is not allowed.")
+        return Decision.proceed()
+
+    async def after(context: Context, step: AfterToolCall) -> Decision | None:
+        if step.call.arguments.get("location") == "Tokyo":
+            return Decision.terminate("a result for Tokyo")
+        return Decision.proceed()
+
+    return ProtocolGroup(before, after)
+
+
+@pytest.mark.anyio
+async def test_a_rejection_the_client_put_back_is_not_judged_as_a_result() -> None:
+    handler = Handler(rejects_tokyo_and_ends_at_its_result())
+    await handler.request(_from_inspect(request("a")))
+    await handler.reply(
+        reply(message(weather("Tokyo", "toolu_1"), weather("Paris", "toolu_2")), id="a")
+    )
+
+    # the eval put the turn back as the model proposed it, from the field,
+    # with the rejection as inspect_ai writes it
+    restored = [
+        {
+            "role": "assistant",
+            "content": [weather("Tokyo", "toolu_1"), weather("Paris", "toolu_2")],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_1",
+                    "content": "Tokyo is not allowed.",
+                    "is_error": True,
+                },
+                {"type": "tool_result", "tool_use_id": "toolu_2", "content": "Sunny."},
+            ],
+        },
+    ]
+    answer = await handler.request(_from_inspect(request("b", then=restored)))
+
+    # nothing to add, and no result for Tokyo was judged
+    assert answer == Pass()
+
+
+@pytest.mark.anyio
+async def test_a_result_for_a_call_taken_out_is_refused() -> None:
+    handler = Handler(rejects_tokyo_and_ends_at_its_result())
+    await handler.request(_from_inspect(request("a")))
+    await handler.reply(
+        reply(message(weather("Tokyo", "toolu_1"), weather("Paris", "toolu_2")), id="a")
+    )
+
+    # a client that claims to have run the call it was never handed
+    ran_anyway = [
+        {
+            "role": "assistant",
+            "content": [weather("Tokyo", "toolu_1"), weather("Paris", "toolu_2")],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": "Rain."},
+                {"type": "tool_result", "tool_use_id": "toolu_2", "content": "Sunny."},
+            ],
+        },
+    ]
+
+    with pytest.raises(UnreadableError, match="never ran"):
+        await handler.request(_from_inspect(request("b", then=ran_anyway)))

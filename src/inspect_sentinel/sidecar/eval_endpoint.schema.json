@@ -1319,6 +1319,18 @@
           ],
           "default": null,
           "description": "The model's turn, when the latest attempt was refused it because a call in it was rejected, as the `sentinel` field holds it. An eval puts it into its own copy of the conversation, as it would from the field."
+        },
+        "proposed": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WithheldTurn"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The model's turn as it proposed it, when the latest attempt was handed it with calls taken out because they were rejected, as the `sentinel` field holds it."
         }
       },
       "required": [

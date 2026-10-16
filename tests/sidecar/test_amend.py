@@ -99,9 +99,10 @@ def _ran(call: ToolCall, text: str = "Sunny.") -> ChatMessageTool:
 
 
 async def _amended(turn: _Turn, body: bytes) -> bytes | None:
-    return await amend_request(
+    amended = await amend_request(
         turn.provider, body, edited=[turn.edited], format=turn.format
     )
+    return amended.body
 
 
 @pytest.mark.anyio
@@ -140,7 +141,12 @@ async def test_a_turn_the_client_restored_has_nothing_added(format: Format) -> N
         [_ran(turn.paris), rejection(turn.tokyo, "Not Tokyo."), _ran(turn.lima)],
     )
 
-    assert await _amended(turn, body) is None
+    amended = await amend_request(
+        turn.provider, body, edited=[turn.edited], format=turn.format
+    )
+    assert amended.body is None
+    # the rejection the client put back is the sidecar's, not a result
+    assert amended.restored == {turn.tokyo.id}
 
 
 @pytest.mark.anyio
@@ -269,8 +275,8 @@ async def test_a_refused_turn_after_an_edited_one_goes_after_it() -> None:
         format="anthropic-messages",
     )
 
-    assert amended is not None
-    messages = await read_request("anthropic", amended, "anthropic-messages")
+    assert amended.body is not None
+    messages = await read_request("anthropic", amended.body, "anthropic-messages")
     calls = [
         [call.id for call in m.tool_calls or []]
         for m in messages

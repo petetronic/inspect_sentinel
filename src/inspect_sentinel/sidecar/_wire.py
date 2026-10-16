@@ -275,6 +275,16 @@ async def amendments(
     return written
 
 
+@dataclass(frozen=True)
+class Amended:
+    """A request with what the client was never handed added to it."""
+
+    body: bytes | None
+    """The request with the turns added and put back, or None if there was nothing to change."""
+    restored: frozenset[str]
+    """The ids of the calls taken out of an edited turn whose rejection the client had put back itself, exactly as the sidecar writes it. Their results are the sidecar's, not results of calls that ran."""
+
+
 async def amend_request(
     provider: str,
     body: bytes,
@@ -282,7 +292,7 @@ async def amend_request(
     inserted: Mapping[int, Sequence[Turn]] | None = None,
     edited: Sequence[Edited] = (),
     format: Format | None = None,
-) -> bytes | None:
+) -> Amended:
     """Tell the model, in a later request of its conversation, of what the client was never handed.
 
     Each rejected turn, the model's message followed by a result for each of its calls saying why it didn't run, goes where the client would have put it had it been handed the reply: after the entries the client had sent when the turn was rejected.
@@ -298,9 +308,6 @@ async def amend_request(
         edited: The edited turns the request continues from.
         format: Which API the body is written in, if the proxy said.
 
-    Returns:
-        The request with the turns added and put back, or None if there was nothing to change.
-
     Raises:
         UnreadableError: If the request holds a call of an edited turn other than as the client was handed it or as the model proposed it, so what happened to the turn can't be told.
     """
@@ -311,6 +318,7 @@ async def amend_request(
     entries = _conversation(request, api)
     segments: list[list[Any]] = [[entry] for entry in entries]
     changed = False
+    restored: set[str] = set()
     for turn in edited:
         found = api.turn_at(entries, turn.sent)
         if found is not None and not any(
@@ -325,7 +333,8 @@ async def amend_request(
                 )
         if found is None:
             continue
-        amended = _amend(found, turn, api)
+        amended, held = _amend(found, turn, api)
+        restored |= held
         if amended is not None:
             segments[start] = amended
             for index in range(start + 1, end):
@@ -345,9 +354,9 @@ async def amend_request(
         if count < len(entries):
             sent.extend(segments[count])
     if not changed:
-        return None
+        return Amended(None, frozenset(restored))
     request[api.conversation] = sent
-    return json.dumps(request).encode()
+    return Amended(json.dumps(request).encode(), frozenset(restored))
 
 
 @dataclass(frozen=True)
@@ -365,7 +374,9 @@ class Spliced:
     """The entries from `start` to `end` again, holding the calls and results given."""
 
 
-def _amend(found: Spliced, turn: Edited, api: _Api) -> list[Any] | None:
+def _amend(
+    found: Spliced, turn: Edited, api: _Api
+) -> tuple[list[Any] | None, set[str]]:
     # the turn's calls, as the client holds them
     held = {
         id: element
@@ -428,9 +439,10 @@ def _amend(found: Spliced, turn: Edited, api: _Api) -> list[Any] | None:
         },
         turn.order,
     )
+    restored = {id for id in turn.taken_out if id in told}
     if calls == found.calls and results == found.results:
-        return None
-    return found.rebuild(calls, results)
+        return None, restored
+    return found.rebuild(calls, results), restored
 
 
 def _told(api: _Api, amendment: Amendment) -> tuple[str | None, str, bool]:

@@ -16,7 +16,7 @@ from ._exchange import Refuse
 from ._host import ListRecorder, Record
 from ._inspect_client import Exchange, Withheld
 from ._registration import TaskFacts
-from ._wire import Offered, Turn
+from ._wire import Edited, Format, Offered, Turn
 
 V = TypeVar("V")
 
@@ -59,6 +59,9 @@ class Attempt:
 
     withheld: Withheld | None = None
     """The model's turn, when the client was refused it because a call in it was rejected."""
+
+    proposed: Withheld | None = None
+    """The model's turn as it proposed it, when the client was handed it with calls taken out."""
 
     def decide(self, outcome: Outcome, message: str | None = None) -> None:
         """Mark the attempt decided."""
@@ -105,6 +108,9 @@ class Conversation:
 
     rejected: list[Rejected] = field(default_factory=list[Rejected])
     """The points at which turns were rejected."""
+
+    edited: list[Edited] = field(default_factory=list[Edited])
+    """The turns the client was handed with calls taken out. Each is kept for as long as the conversation is: it says what the model is told in every later request that holds the turn."""
 
     noted: JsonValue | None = None
     """What inspect_ai's converters noted while reading the conversation's replies, which reading the next one needs."""
@@ -158,6 +164,8 @@ class Held:
     answered: bool
     """Whether the request continues one whose reply was passed on, so that it holds a turn the model wrote."""
     model: str
+    format: Format
+    """The API the request is written in, which later requests of the conversation are too."""
     recorder: ListRecorder
     input: list[ChatMessage]
     """What the model was sent."""

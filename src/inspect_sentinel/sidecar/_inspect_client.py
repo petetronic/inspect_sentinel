@@ -96,6 +96,8 @@ class Exchange:
     """The steps judged, in order."""
     withheld: Withheld | None = None
     """The turn the client was refused, if it was."""
+    proposed: Withheld | None = None
+    """The turn as the model proposed it, if the client was handed it with calls taken out."""
     message: str | None = None
     """What the model is told of the rejection, if the turn was refused for one."""
 
@@ -151,6 +153,10 @@ class SentinelField(BaseModel):
         default=None,
         description="The model's turn, when the client was refused it because a call in it was rejected.",
     )
+    proposed: WithheldTurn | None = Field(
+        default=None,
+        description="The model's turn as it proposed it, when the client was handed it with calls taken out because they were rejected. `results` holds what the model is told of each call taken out. The sidecar puts those calls and results back in each later request of the conversation that doesn't already hold them.",
+    )
 
 
 def sentinel_field(
@@ -188,12 +194,13 @@ def sentinel_field(
                 recorded=None if trimmed else [record_json(r) for r in step.records],
             )
         )
-    withheld = exchange.withheld
+    withheld, proposed = exchange.withheld, exchange.proposed
     written = SentinelField(
         outcome=outcome,
         trimmed=True if trimmed else None,
         steps=steps,
         withheld=withheld_turn(withheld) if withheld is not None else None,
+        proposed=withheld_turn(proposed) if proposed is not None else None,
     )
     return written.model_dump(mode="json", exclude_none=True)
 

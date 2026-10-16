@@ -540,3 +540,24 @@ async def test_a_rejected_turn_is_given_back_by_request_result() -> None:
     withheld = result["withheld"]
     assert withheld["message"]["role"] == "assistant"
     assert withheld["results"] == {"toolu_1": "Tokyo is not allowed."}
+
+
+@pytest.mark.anyio
+async def test_a_turn_with_a_call_taken_out_is_given_back_by_request_result() -> None:
+    handler = Handler(weather_rule("reject", "Tokyo"))
+    await handler.request(_asked("x"))
+    await handler.reply(
+        reply(message(weather("Tokyo", "toolu_1"), weather("Paris", "toolu_2")))
+    )
+
+    result = await _request_result(handler)
+
+    # the turn went on without Tokyo
+    assert result["outcome"] == "proceed"
+    assert "withheld" not in result
+    proposed = result["proposed"]
+    assert [call["id"] for call in proposed["message"]["tool_calls"]] == [
+        "toolu_1",
+        "toolu_2",
+    ]
+    assert proposed["results"] == {"toolu_1": "Tokyo is not allowed."}

@@ -95,6 +95,10 @@ class RequestResultResult(BaseModel):
         default=None,
         description="The model's turn, when the latest attempt was refused it because a call in it was rejected, as the `sentinel` field holds it. An eval puts it into its own copy of the conversation, as it would from the field.",
     )
+    proposed: WithheldTurn | None = Field(
+        default=None,
+        description="The model's turn as it proposed it, when the latest attempt was handed it with calls taken out because they were rejected, as the `sentinel` field holds it.",
+    )
 
 
 class RunResultParams(BaseModel):
@@ -243,6 +247,9 @@ async def _answer(handler: Handler, method: str, params: dict[str, Any]) -> Base
             recorded=[record_json(record) for record in found.records],
             withheld=(
                 withheld_turn(latest.withheld) if latest.withheld is not None else None
+            ),
+            proposed=(
+                withheld_turn(latest.proposed) if latest.proposed is not None else None
             ),
         )
     if isinstance(given, RunResultParams):

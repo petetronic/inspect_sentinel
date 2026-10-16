@@ -298,8 +298,9 @@ from inspect_sentinel import BeforeToolCall, Context, Decision, protocol
 @protocol
 def weather_rule():
     async def decide(context: Context, step: BeforeToolCall) -> Decision | None:
-        if step.call.arguments.get("location") == {city!r}:
-            return Decision.reject("a lookup", message={message!r})
+        location = step.call.arguments.get("location")
+        if {city!r} in (None, location):
+            return Decision.reject("a lookup", message=f"{{location}} is not allowed.")
         return Decision.proceed()
 
     return decide
@@ -318,10 +319,10 @@ def _sidecar_python() -> Path:
 
 
 @contextmanager
-def _sidecar(city: str, tmp_path: Path) -> Generator[str]:
-    """The address of a real sidecar, whose sentinel rejects a weather lookup of `city`."""
+def _sidecar(city: str | None, tmp_path: Path) -> Generator[str]:
+    """The address of a real sidecar, whose sentinel rejects a weather lookup of `city`, or every lookup for None."""
     rule = tmp_path / "weather_rule.py"
-    rule.write_text(_RULE.format(city=city, message=f"{city} is not allowed."))
+    rule.write_text(_RULE.format(city=city))
     with socket.socket() as free:
         free.bind(("127.0.0.1", 0))
         port = free.getsockname()[1]
@@ -446,7 +447,8 @@ def test_reply_the_sentinel_rejects_is_refused_in_its_words(
     # the recorded Responses stream is the one reply that names the country too
     city = "Paris, France" if on is _RESPONSES and streamed else "Paris"
 
-    with _sidecar(city, tmp_path) as url:
+    # every call, so that the turn is refused whole; the first is Paris
+    with _sidecar(None, tmp_path) as url:
         status, message, _, let_go = _refused(
             _make(monkeypatch, url), on, _data(on), streamed
         )

@@ -299,6 +299,18 @@
           ],
           "default": null,
           "description": "The model's turn, when the client was refused it because a call in it was rejected."
+        },
+        "proposed": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WithheldTurn"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The model's turn as it proposed it, when the client was handed it with calls taken out because they were rejected. `results` holds what the model is told of each call taken out. The sidecar puts those calls and results back in each later request of the conversation that doesn't already hold them."
         }
       },
       "required": [
