@@ -364,3 +364,77 @@ async def test_a_changed_call_under_another_function_is_unreadable(
 
     with pytest.raises(UnreadableError, match="another kind or function"):
         await _amended(turn, body)
+
+
+def _thinking(text: str, signature: str) -> dict[str, Any]:
+    return {"type": "thinking", "thinking": text, "signature": signature}
+
+
+async def _interleaved() -> tuple[Edited, list[dict[str, Any]]]:
+    """A turn that thinks before each of its calls, whose first call, Tokyo, was taken out; and the blocks a client was handed of it."""
+    first, second = _thinking("Tokyo first.", "sig_1"), _thinking("Now Paris.", "sig_2")
+    tokyo, paris = weather("Tokyo", "toolu_1"), weather("Paris", "toolu_2")
+    output, noted = await read_reply_noted(
+        "anthropic", JSON, message(first, tokyo, second, paris)
+    )
+    taken_out = {"toolu_1": "Not Tokyo."}
+    edited = Edited(
+        sent=1,
+        mark="m",
+        order=("toolu_1", "toolu_2"),
+        taken_out=taken_out,
+        originals={},
+        modified={},
+        amendments=await amendments(
+            "anthropic-messages", output.message, taken_out, (), noted
+        ),
+    )
+    return edited, [first, second, paris]
+
+
+def _anthropic_request(content: list[dict[str, Any]]) -> bytes:
+    told = {"type": "tool_result", "tool_use_id": "toolu_2", "content": "Sunny."}
+    return json.dumps(
+        {
+            "model": "m",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": _ASKED},
+                {"role": "assistant", "content": content},
+                {"role": "user", "content": [told]},
+            ],
+        }
+    ).encode()
+
+
+def _blocks(body: bytes) -> list[str]:
+    return [
+        block.get("signature") or block["id"]
+        for block in json.loads(body)["messages"][1]["content"]
+    ]
+
+
+@pytest.mark.anyio
+async def test_a_call_goes_back_between_the_thinking_it_parted() -> None:
+    edited, handed = await _interleaved()
+
+    amended = await amend_request(
+        "anthropic", _anthropic_request(handed), edited=[edited]
+    )
+
+    # thinking blocks the call stood between are kept apart, as they came
+    assert amended.body is not None
+    assert _blocks(amended.body) == ["sig_1", "toolu_1", "sig_2", "toolu_2"]
+
+
+@pytest.mark.anyio
+async def test_a_call_goes_back_before_the_next_if_its_thinking_was_left_out() -> None:
+    edited, handed = await _interleaved()
+
+    # a client may leave out the thinking of an earlier turn
+    amended = await amend_request(
+        "anthropic", _anthropic_request(handed[2:]), edited=[edited]
+    )
+
+    assert amended.body is not None
+    assert _blocks(amended.body) == ["toolu_1", "toolu_2"]

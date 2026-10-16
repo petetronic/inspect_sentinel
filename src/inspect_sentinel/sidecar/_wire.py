@@ -208,6 +208,8 @@ class Amendment:
     """The model's own call: a content block for Anthropic, an entry of `tool_calls` for Chat Completions, an input item for Responses."""
     result: tuple[Any, ...] = ()
     """For a call taken out, its rejection: a `tool_result` block, a tool message, or an output item, and for a Responses computer call the message that says why. Empty for a changed call."""
+    after: object = None
+    """What came just before the call in the model's turn, as `block_key` names it, or None if the call came first. A call taken out goes back right after it, so that it parts what it parted: Anthropic takes thinking blocks that were apart as they came, and not run together."""
 
 
 @dataclass(frozen=True)
@@ -271,8 +273,32 @@ async def amendments(
         with noting(noted):
             rendered = await api.rejected_turn(message, results)
         call, result = api.pick(rendered, id)
-        written[id] = Amendment(call, result if id in taken_out else ())
+        turn = api.turn_at(rendered, 0)
+        elements = turn.calls if turn is not None else []
+        place = next(
+            (i for i, element in enumerate(elements) if api.call_of(element)[0] == id),
+            0,
+        )
+        after = block_key(api, elements[place - 1]) if place > 0 else None
+        written[id] = Amendment(call, result if id in taken_out else (), after)
     return written
+
+
+def block_key(api: _Api, element: object) -> object:
+    """What a block of an assistant's turn is known by, so that it can be found again in a later request: a call by its id, a thinking block by its signature, any other block by what it holds."""
+    call = api.call_of(element)[0]
+    if call is not None:
+        return ("call", call)
+    if isinstance(element, dict):
+        block = cast("dict[str, Any]", element)
+        for name in ("signature", "data", "id"):
+            value = block.get(name)
+            if isinstance(value, str) and value:
+                return (name, value)
+        return json.dumps(
+            {k: v for k, v in block.items() if k != "cache_control"}, sort_keys=True
+        )
+    return json.dumps(element, sort_keys=True, default=str)
 
 
 @dataclass(frozen=True)
@@ -424,6 +450,7 @@ def _amend(
         lambda element: api.call_of(element)[0],
         {id: [turn.amendments[id].call] for id in turn.taken_out if id not in held},
         turn.order,
+        lambda placed, id: _after(api, placed, turn.amendments[id]),
     )
     told = {
         id: element
@@ -496,18 +523,39 @@ def _told(api: _Api, amendment: Amendment) -> tuple[str | None, object]:
     return (None, None)
 
 
+def _after(api: _Api, placed: list[Any], amendment: Amendment) -> int | None:
+    # right after what came just before the call in the model's turn, or
+    # first if nothing did; None if the client no longer holds it, as a client
+    # may leave out an earlier turn's thinking
+    if amendment.after is None:
+        return 0
+    return next(
+        (
+            i + 1
+            for i, element in enumerate(placed)
+            if block_key(api, element) == amendment.after
+        ),
+        None,
+    )
+
+
 def _inserted(
     elements: list[Any],
     key: Callable[[Any], str | None],
     new: Mapping[str, Sequence[Any]],
     order: Sequence[str],
+    anchor: Callable[[list[Any], str], int | None] | None = None,
 ) -> list[Any]:
-    # Each new call or result goes before the first of those after it in the
-    # model's order that is there, or else after the last of the turn's, or
-    # else first.
+    # Each new call or result goes where `anchor` says, if it says; or else
+    # before the first of those after it in the model's order that is there;
+    # or else after the last of the turn's; or else first.
     placed = list(elements)
     for index, id in enumerate(order):
         if id not in new:
+            continue
+        at = anchor(placed, id) if anchor is not None else None
+        if at is not None:
+            placed[at:at] = list(new[id])
             continue
         later = set(order[index + 1 :])
         at = next(
