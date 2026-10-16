@@ -17,9 +17,9 @@ import time
 import urllib.request
 from collections.abc import AsyncIterator, Callable, Generator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import jsonschema
@@ -408,6 +408,89 @@ def test_exchange_the_sentinel_allows_goes_on_as_it_is(
         assert [_written(chunk) for chunk in reply] == [
             _written(chunk) for chunk in on.stream()
         ]
+
+
+# The Messages route's replies above make one call; these make three, Paris,
+# Tokyo and Lima, as the recorded OpenAI replies do.
+_THREE_CALLS = replace(
+    _MESSAGES,
+    whole=lambda: (
+        json.loads(
+            message(
+                weather("Paris", "toolu_1"),
+                weather("Tokyo", "toolu_2"),
+                weather("Lima", "toolu_3"),
+            )
+        )
+        | {"_hidden_params": _notes()}
+    ),
+    stream=lambda: [anthropic_recorded("parallel-tool-calls")],
+)
+
+
+def _events_out(sent: list[Any]) -> list[dict[str, Any]]:
+    # each event of a stream as the caller is sent it: bytes as they are, and
+    # LiteLLM's own objects as LiteLLM writes them
+    events: list[dict[str, Any]] = []
+    for chunk in sent:
+        if isinstance(chunk, bytes):
+            events += stream_events(chunk)
+        else:
+            events.append(_written(chunk))
+    return events
+
+
+def _call_ids(on: _On, reply: Any, streamed: bool) -> list[str]:
+    """The ids of the calls a reply makes, in order, as the caller is sent it."""
+    if not streamed:
+        whole: Any = cast(Any, reply) if isinstance(reply, dict) else _written(reply)
+        if on.format == "anthropic-messages":
+            return [b["id"] for b in whole["content"] if b["type"] == "tool_use"]
+        if on.format == "openai-chat":
+            return [c["id"] for c in whole["choices"][0]["message"]["tool_calls"]]
+        return [i["call_id"] for i in whole["output"] if i["type"] == "function_call"]
+    ids: list[str] = []
+    event: Any
+    for event in _events_out(reply):
+        if event.get("type") == "content_block_start":
+            block: Any = event["content_block"]
+            if block["type"] == "tool_use":
+                ids.append(block["id"])
+        choice: Any
+        for choice in cast(list[Any], event.get("choices") or []):
+            delta: Any = choice.get("delta") or {}
+            call: Any
+            for call in cast(list[Any], delta.get("tool_calls") or []):
+                if call.get("id"):
+                    ids.append(call["id"])
+        if event.get("type") == "response.output_item.added":
+            if event["item"]["type"] == "function_call":
+                ids.append(event["item"]["call_id"])
+    return ids
+
+
+@pytest.mark.parametrize(
+    ("on", "streamed"),
+    [
+        pytest.param(
+            route, streamed, id=f"{route.format}{', streamed' if streamed else ''}"
+        )
+        for route in (_THREE_CALLS, _CHAT, _RESPONSES)
+        for streamed in (False, True)
+    ],
+)
+def test_a_reply_with_a_rejected_call_goes_on_without_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, on: _On, streamed: bool
+) -> None:
+    proposed = _call_ids(on, on.stream() if streamed else on.whole(), streamed)
+    # the recorded Responses stream is the one reply that names the country too
+    city = "Tokyo, Japan" if on is _RESPONSES and streamed else "Tokyo"
+
+    with _sidecar(city, tmp_path) as url:
+        _, reply = _exchange(_make(monkeypatch, url), on, _data(on), streamed)
+
+    # the second call, Tokyo, is taken out, and the others go on
+    assert _call_ids(on, reply, streamed) == [proposed[0], proposed[2]]
 
 
 def _refused(
