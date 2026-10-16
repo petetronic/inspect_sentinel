@@ -406,7 +406,13 @@ def _amend(
                     "The request holds a call of an edited turn that was taken out, not as the model proposed it."
                 )
         elif id in turn.modified:
-            arguments = api.call_of(element)[2]
+            _, kind, name, arguments = api.call_of(element)
+            original = api.call_of(turn.amendments[id].call)
+            # only the arguments can differ from the model's call
+            if (kind, name) != original[1:3]:
+                raise UnreadableError(
+                    "The request holds a changed call of an edited turn as a call of another kind or function."
+                )
             if arguments == turn.modified[id].arguments:
                 calls[calls.index(element)] = turn.amendments[id].call
             elif arguments != turn.originals[id].arguments:
@@ -445,13 +451,49 @@ def _amend(
     return found.rebuild(calls, results), restored
 
 
-def _told(api: _Api, amendment: Amendment) -> tuple[str | None, str, bool]:
-    # the rejection's result, as its keyed element reads
+def held_rejections(
+    provider: str,
+    body: bytes,
+    written: Mapping[str, Amendment],
+    format: Format | None = None,
+) -> frozenset[str]:
+    """The calls of refused turns whose rejections a client put back itself, exactly as the sidecar writes them, as an Inspect eval does from the `sentinel` field. Their results are the sidecar's, not results of calls that ran.
+
+    Args:
+        provider: Whose API the body is written for.
+        body: The request body.
+        written: The calls of the refused turns the request holds, with their rejections as the sidecar writes them, by call id.
+        format: Which API the body is written in, if the proxy said.
+
+    Raises:
+        UnreadableError: If the request holds any other result for one of those calls, which never ran.
+    """
+    if not written:
+        return frozenset()
+    request = json_object(body, "request")
+    api = _api(provider, request, format)
+    held: set[str] = set()
+    for entry in _conversation(request, api):
+        for element in api.results_in(entry):
+            said = api.result_of(element)
+            id = said[0]
+            if id is None or id not in written:
+                continue
+            if said != _told(api, written[id]):
+                raise UnreadableError(
+                    "The request holds a result for a call of a refused turn, which never ran."
+                )
+            held.add(id)
+    return frozenset(held)
+
+
+def _told(api: _Api, amendment: Amendment) -> tuple[str | None, object]:
+    # the rejection's result, the element of it that names the call
     for element in amendment.result:
         said = api.result_of(element)
         if said[0] is not None:
             return said
-    return (None, "", False)
+    return (None, None)
 
 
 def _inserted(
@@ -828,8 +870,13 @@ class _Api:
     # where an edited turn sits in a request, and what its parts say
     turn_at: Callable[[list[Any], int], Spliced | None]
     call_ids: Callable[[object], list[str]]
-    call_of: Callable[[object], tuple[str | None, str | None, object]]
-    result_of: Callable[[object], tuple[str | None, str, bool]]
+    # a call's id, kind, name and arguments as JSON says them
+    call_of: Callable[[object], tuple[str | None, object, object, object]]
+    # a result's call id, and the whole result, so that two equal results are
+    # equal in everything they hold
+    result_of: Callable[[object], tuple[str | None, object]]
+    # the results an entry of the conversation holds
+    results_in: Callable[[object], list[object]]
     pick: Callable[[list[Any], str], tuple[Any, tuple[Any, ...]]]
 
 
@@ -854,6 +901,7 @@ def _api_of(format: Format) -> _Api:
                 _anthropic.call_ids,
                 _anthropic.call_of,
                 _anthropic.result_of,
+                _anthropic.results_in,
                 _anthropic.pick,
             )
         case "openai-chat":
@@ -869,6 +917,7 @@ def _api_of(format: Format) -> _Api:
                 _openai.chat_call_ids,
                 _openai.chat_call_of,
                 _openai.chat_result_of,
+                _openai.chat_results_in,
                 _openai.chat_pick,
             )
         case "openai-responses":
@@ -884,6 +933,7 @@ def _api_of(format: Format) -> _Api:
                 _openai.responses_call_ids,
                 _openai.responses_call_of,
                 _openai.responses_result_of,
+                _openai.responses_results_in,
                 _openai.responses_pick,
             )
 

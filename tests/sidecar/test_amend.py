@@ -285,3 +285,82 @@ async def test_a_refused_turn_after_an_edited_one_goes_after_it() -> None:
     assert calls == [list(turn.edited.order), ["toolu_9"]]
     told = [m.tool_call_id for m in messages if isinstance(m, ChatMessageTool)]
     assert told == [*turn.edited.order, "toolu_9"]
+
+
+_PNG = "iVBORw0KGgo="
+
+
+def _with_an_image(format: Format, result: dict[str, Any]) -> None:
+    """Add an image beside the text of a result as written in `format`."""
+    if format == "anthropic-messages":
+        result["content"] = [
+            {"type": "text", "text": result["content"]},
+            {
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/png", "data": _PNG},
+            },
+        ]
+    elif format == "openai-chat":
+        result["content"] = [
+            {"type": "text", "text": result["content"]},
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{_PNG}"},
+            },
+        ]
+    else:
+        result["output"] = [
+            {"type": "input_text", "text": result["output"]},
+            {"type": "input_image", "image_url": f"data:image/png;base64,{_PNG}"},
+        ]
+
+
+def _result_for(format: Format, body: dict[str, Any], id: str) -> dict[str, Any]:
+    entries = body["input" if format == "openai-responses" else "messages"]
+    for entry in entries:
+        candidates = (
+            entry["content"]
+            if format == "anthropic-messages" and isinstance(entry["content"], list)
+            else [entry]
+        )
+        for candidate in candidates:
+            if id in (
+                candidate.get("tool_use_id"),
+                candidate.get("tool_call_id"),
+                candidate.get("call_id") if "output" in candidate else None,
+            ):
+                return candidate
+    raise AssertionError(f"no result for {id}")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("format", _REPLIES)
+async def test_a_restored_rejection_with_anything_added_is_unreadable(
+    format: Format,
+) -> None:
+    turn = await _turn(format)
+    body = json.loads(
+        await _request(
+            turn,
+            [turn.paris, turn.tokyo, turn.lima],
+            [_ran(turn.paris), rejection(turn.tokyo, "Not Tokyo."), _ran(turn.lima)],
+        )
+    )
+    # the rejection's own text, and an image beside it
+    _with_an_image(format, _result_for(format, body, turn.tokyo.id))
+
+    with pytest.raises(UnreadableError, match="never ran"):
+        await _amended(turn, json.dumps(body).encode())
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("format", _REPLIES)
+async def test_a_changed_call_under_another_function_is_unreadable(
+    format: Format,
+) -> None:
+    turn = await _turn(format)
+    other = replace(turn.oslo, function="get_time")
+    body = await _request(turn, [turn.paris, other], [_ran(turn.paris), _ran(other)])
+
+    with pytest.raises(UnreadableError, match="another kind or function"):
+        await _amended(turn, body)

@@ -16,7 +16,7 @@ from ._exchange import Refuse
 from ._host import ListRecorder, Record
 from ._inspect_client import Exchange, Withheld
 from ._registration import TaskFacts
-from ._wire import Edited, Format, Offered, Turn
+from ._wire import Amendment, Edited, Format, Offered, Turn
 
 V = TypeVar("V")
 
@@ -87,6 +87,11 @@ class Rejected:
 
     turns: list[Turn]
     """Each rejected turn."""
+
+    written: list[Mapping[str, Amendment]] = field(
+        default_factory=list[Mapping[str, Amendment]]
+    )
+    """For each rejected turn, its calls and their rejections as inspect_ai writes them in the conversation's format, by call id, so that a client that put the turn back itself can be told from one that ran its calls."""
 
 
 def occurrence(call: str, index: int) -> str:

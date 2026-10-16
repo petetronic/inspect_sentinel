@@ -275,29 +275,33 @@ def call_ids(entry: object) -> list[str]:
     return [id for block in cast("list[object]", content) if (id := _tool_use(block))]
 
 
-def call_of(element: object) -> tuple[str | None, str | None, object]:
+def call_of(element: object) -> tuple[str | None, object, object, object]:
     id = _tool_use(element)
     if id is None:
-        return None, None, None
+        return None, None, None, None
     block = cast("dict[str, Any]", element)
-    return id, block.get("name"), block.get("input")
+    return id, block.get("type"), block.get("name"), block.get("input")
 
 
-def result_of(element: object) -> tuple[str | None, str, bool]:
+def result_of(element: object) -> tuple[str | None, object]:
+    # the whole block, but for the cache mark inspect_ai's provider moves
     block = cast("dict[str, Any]", element) if isinstance(element, dict) else {}
     if block.get("type") != "tool_result":
-        return None, "", False
-    content: object = block.get("content")
-    text = (
-        "".join(
-            str(cast("dict[str, Any]", part).get("text", ""))
-            for part in cast("list[object]", content)
-            if isinstance(part, dict)
-        )
-        if isinstance(content, list)
-        else str(content or "")
-    )
-    return block.get("tool_use_id"), text, bool(block.get("is_error"))
+        return None, None
+    whole = {key: value for key, value in block.items() if key != "cache_control"}
+    return block.get("tool_use_id"), whole
+
+
+def results_in(entry: object) -> list[object]:
+    message = cast("dict[str, Any]", entry) if isinstance(entry, dict) else {}
+    content: object = message.get("content")
+    if message.get("role") != "user" or not isinstance(content, list):
+        return []
+    return [
+        block
+        for block in cast("list[object]", content)
+        if result_of(block)[0] is not None
+    ]
 
 
 def pick(rendered: list[Any], id: str) -> tuple[Any, tuple[Any, ...]]:

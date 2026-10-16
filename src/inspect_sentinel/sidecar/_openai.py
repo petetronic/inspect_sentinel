@@ -658,20 +658,26 @@ def chat_call_ids(entry: object) -> list[str]:
     return [id for call in cast("list[object]", calls) if (id := _id(call, "id"))]
 
 
-def chat_call_of(element: object) -> tuple[str | None, str | None, object]:
+def chat_call_of(element: object) -> tuple[str | None, object, object, object]:
     id = _id(element, "id")
     if id is None:
-        return None, None, None
-    function: object = cast("dict[str, Any]", element).get("function")
+        return None, None, None, None
+    call = cast("dict[str, Any]", element)
+    function: object = call.get("function")
     entry = cast("dict[str, Any]", function) if isinstance(function, dict) else {}
-    return id, entry.get("name"), _parsed(entry.get("arguments"))
+    kind = call.get("type", "function")
+    return id, kind, entry.get("name"), _parsed(entry.get("arguments"))
 
 
-def chat_result_of(element: object) -> tuple[str | None, str, bool]:
+def chat_result_of(element: object) -> tuple[str | None, object]:
     message = cast("dict[str, Any]", element) if isinstance(element, dict) else {}
     if message.get("role") != "tool":
-        return None, "", False
-    return _id(message, "tool_call_id"), _text(message.get("content")), False
+        return None, None
+    return _id(message, "tool_call_id"), message
+
+
+def chat_results_in(entry: object) -> list[object]:
+    return [entry] if chat_result_of(entry)[0] is not None else []
 
 
 def chat_pick(rendered: list[Any], id: str) -> tuple[Any, tuple[Any, ...]]:
@@ -719,21 +725,25 @@ def responses_call_ids(entry: object) -> list[str]:
     return [id] if id is not None else []
 
 
-def responses_call_of(element: object) -> tuple[str | None, str | None, object]:
+def responses_call_of(element: object) -> tuple[str | None, object, object, object]:
     id = _call_id(element)
     if id is None:
-        return None, None, None
+        return None, None, None, None
     item = cast("dict[str, Any]", element)
-    if item.get("type") == "function_call":
-        return id, item.get("name"), _parsed(item.get("arguments"))
-    return id, item.get("name"), item.get("input", item.get("action"))
+    kind = item.get("type")
+    if kind == "function_call":
+        return id, kind, item.get("name"), _parsed(item.get("arguments"))
+    return id, kind, item.get("name"), item.get("input", item.get("action"))
 
 
-def responses_result_of(element: object) -> tuple[str | None, str, bool]:
+def responses_result_of(element: object) -> tuple[str | None, object]:
     if not _is_output(element):
-        return None, "", False
-    item = cast("dict[str, Any]", element)
-    return _id(item, "call_id"), _text(item.get("output")), False
+        return None, None
+    return _id(element, "call_id"), element
+
+
+def responses_results_in(entry: object) -> list[object]:
+    return [entry] if responses_result_of(entry)[0] is not None else []
 
 
 def responses_pick(rendered: list[Any], id: str) -> tuple[Any, tuple[Any, ...]]:

@@ -702,3 +702,50 @@ async def test_a_changed_calls_result_is_judged_as_the_call_that_ran() -> None:
 
     # nothing to put back, and the result was judged as Oslo's
     assert answer == Pass()
+
+
+def _refused_turn_put_back(told: str) -> list[dict[str, Any]]:
+    # a refused turn as an eval puts it back from the field
+    return [
+        {"role": "assistant", "content": [weather("Tokyo", "toolu_1")]},
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_1",
+                    "content": told,
+                    "is_error": True,
+                }
+            ],
+        },
+    ]
+
+
+@pytest.mark.anyio
+async def test_a_refused_turns_rejection_the_client_put_back_is_not_judged() -> None:
+    handler = Handler(rejects_tokyo_and_ends_at_its_result())
+    await handler.request(_from_inspect(request("a")))
+    refused = await handler.reply(reply(message(weather("Tokyo", "toolu_1")), id="a"))
+    assert isinstance(refused, Refuse)
+
+    answer = await handler.request(
+        _from_inspect(
+            request("b", then=_refused_turn_put_back("Tokyo is not allowed."))
+        )
+    )
+
+    # nothing to add, and no result for Tokyo was judged
+    assert answer == Pass()
+
+
+@pytest.mark.anyio
+async def test_another_result_for_a_refused_call_is_unreadable() -> None:
+    handler = Handler(rejects_tokyo_and_ends_at_its_result())
+    await handler.request(_from_inspect(request("a")))
+    await handler.reply(reply(message(weather("Tokyo", "toolu_1")), id="a"))
+
+    with pytest.raises(UnreadableError, match="refused turn"):
+        await handler.request(
+            _from_inspect(request("b", then=_refused_turn_put_back("Rain.")))
+        )

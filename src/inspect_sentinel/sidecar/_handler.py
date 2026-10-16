@@ -68,6 +68,7 @@ from ._wire import (
     amendments,
     call_texts,
     edit_reply,
+    held_rejections,
     offered,
     read_opening,
     read_reply_noted,
@@ -426,11 +427,23 @@ class Handler:
         # client that was handed a rejected turn, as an Inspect eval is in the
         # sentinel field, may already have put it back itself.
         holds = {_digest(message) for message in messages}
-        told = {
-            rejected.sent: turns
+        continued = [
+            rejected
             for rejected in conversation.rejected
             if rejected.sent < len(marks) and marks[rejected.sent] == rejected.mark
+        ]
+        told = {
+            rejected.sent: turns
+            for rejected in continued
             if (turns := [t for t in rejected.turns if _digest(t[0]) not in holds])
+        }
+        # the rejections of refused turns the client put back itself
+        refused = {
+            id: amendment
+            for rejected in continued
+            for turn, written in zip(rejected.turns, rejected.written, strict=True)
+            if _digest(turn[0]) in holds
+            for id, amendment in written.items()
         }
         edited = [
             turn
@@ -471,8 +484,11 @@ class Handler:
         said = call_texts(request.provider, request.body, request.format)
         # a changed call's result is of the call that ran, whichever the client holds
         ran = {id: call for turn in edited for id, call in turn.modified.items()}
+        restored = amended.restored | held_rejections(
+            request.provider, request.body, refused, request.format
+        )
         ended = await self._results(
-            held, run, conversation, client, said, amended.restored, ran
+            held, run, conversation, client, said, restored, ran
         )
         if ended is not None:
             return self._with_field(ended, proxy, held.exchange, run)
@@ -685,7 +701,7 @@ class Handler:
             return self._passed(held, run, conversation, message)
         taken = {call.id for call, _ in rejected}
         if all(call.id in taken for call in message.tool_calls or []):
-            return self._reject(held, run, conversation, message, noted, rejected)
+            return await self._reject(held, run, conversation, message, noted, rejected)
         try:
             return await self._edit(
                 reply, held, run, conversation, output, start, noted, rejected, modified
@@ -697,7 +713,7 @@ class Handler:
                 ) from ex
             # the reply couldn't be edited as the sentinel decided, so the turn
             # is refused whole, as it was before calls could be taken out
-            return self._reject(held, run, conversation, message, noted, rejected)
+            return await self._reject(held, run, conversation, message, noted, rejected)
 
     def _passed(
         self,
@@ -782,7 +798,7 @@ class Handler:
         self._passed(held, run, conversation, handed)
         return Replace(body)
 
-    def _reject(
+    async def _reject(
         self,
         held: Held,
         run: Run,
@@ -825,6 +841,7 @@ class Handler:
             point = Rejected(held.sent, held.mark, [])
             conversation.rejected.append(point)
         point.turns.append((message, told, noted))
+        point.written.append(await amendments(held.format, message, told, (), noted))
         return Refuse(
             self._reject_status,
             f"A sentinel rejected the call to {call.function}: {why}",
