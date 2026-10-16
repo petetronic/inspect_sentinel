@@ -163,7 +163,8 @@ def weather_rule(action: str = "reject", city: str = "Tokyo") -> Protocol:
         if action == "escalate":
             return Decision.escalate(f"lookup of {city}")
         if action == "modify":
-            return Decision(action="modify", modified=step.call)
+            changed = replace(step.call, arguments={"location": "Oslo"})
+            return Decision(action="modify", modified=changed)
         raise RuntimeError("the rule broke")
 
     return decide

@@ -662,3 +662,43 @@ async def test_a_result_for_a_call_taken_out_is_refused() -> None:
 
     with pytest.raises(UnreadableError, match="never ran"):
         await handler.request(_from_inspect(request("b", then=ran_anyway)))
+
+
+@protocol
+def changes_tokyo_and_ends_at_its_result() -> ProtocolGroup:
+    """Change a lookup of Tokyo to Oslo, and end the run if a result is ever judged as Tokyo's, as only the lookup of Oslo ran."""
+
+    async def before(context: Context, step: BeforeToolCall) -> Decision | None:
+        if step.call.arguments.get("location") == "Tokyo":
+            oslo = replace(step.call, arguments={"location": "Oslo"})
+            return Decision(action="modify", modified=oslo)
+        return Decision.proceed()
+
+    async def after(context: Context, step: AfterToolCall) -> Decision | None:
+        if step.call.arguments.get("location") == "Tokyo":
+            return Decision.terminate("a result judged as Tokyo's")
+        return Decision.proceed()
+
+    return ProtocolGroup(before, after)
+
+
+@pytest.mark.anyio
+async def test_a_changed_calls_result_is_judged_as_the_call_that_ran() -> None:
+    handler = Handler(changes_tokyo_and_ends_at_its_result())
+    await handler.request(_from_inspect(request("a")))
+    answer = await handler.reply(reply(message(weather("Tokyo", "toolu_1")), id="a"))
+    assert isinstance(answer, Replace)
+    field = _field(JSON, answer.body)
+    assert field["steps"][0]["original"]["arguments"] == {"location": "Tokyo"}
+    assert field["steps"][0]["decision"]["modified"]["arguments"] == {
+        "location": "Oslo"
+    }
+
+    # the eval keeps the model's call in its conversation, as in its own
+    # process, with the result of the call that ran
+    answer = await handler.request(
+        _from_inspect(request("b", then=ran("Tokyo", "Snow.", "toolu_1")))
+    )
+
+    # nothing to put back, and the result was judged as Oslo's
+    assert answer == Pass()

@@ -16,6 +16,7 @@ from inspect_sentinel._types import Protocol, ProtocolGroup
 from inspect_sentinel.sidecar import (
     Answer,
     Handler,
+    ModifyError,
     Pass,
     Record,
     Refuse,
@@ -25,6 +26,7 @@ from inspect_sentinel.sidecar import (
     read_reply,
 )
 from tests.sidecar._traffic import (
+    JSON,
     STREAM,
     anthropic_recorded,
     every_call_rule,
@@ -116,11 +118,49 @@ async def test_reply_to_an_unseen_request_cannot_be_judged() -> None:
 
 
 @pytest.mark.anyio
-async def test_modify_is_not_carried_out_yet() -> None:
+async def test_a_changed_call_goes_out_changed() -> None:
     handler = Handler(weather_rule("modify", "Tokyo"))
     await handler.request(request())
 
-    with pytest.raises(NotImplementedError, match="'modify'"):
+    answer = await handler.reply(
+        reply(message(weather("Tokyo", "toolu_1"), weather("Paris", "toolu_2")))
+    )
+
+    assert isinstance(answer, Replace)
+    handed = await read_reply("anthropic", JSON, answer.body)
+    assert [(call.id, call.arguments) for call in handed.message.tool_calls or []] == [
+        ("toolu_1", {"location": "Oslo"}),
+        ("toolu_2", {"location": "Paris"}),
+    ]
+
+
+@pytest.mark.anyio
+async def test_a_changed_call_goes_back_as_the_model_proposed_it() -> None:
+    handler = Handler(weather_rule("modify", "Tokyo"))
+    await handler.request(request("a"))
+    await handler.reply(reply(message(weather("Tokyo", "toolu_1")), id="a"))
+
+    # the client ran the call as it was handed it
+    again = await handler.request(request("b", then=ran("Oslo", "Sunny.", "toolu_1")))
+
+    assert isinstance(again, Replace)
+    assistant = _messages(again.body)[1]
+    calls = [block for block in assistant["content"] if block["type"] == "tool_use"]
+    assert [call["input"] for call in calls] == [{"location": "Tokyo"}]
+
+
+@pytest.mark.anyio
+async def test_a_change_that_cant_be_made_is_not_judged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def unable(*args: object, **kwargs: object) -> bytes:
+        raise UnreadableError("can't")
+
+    monkeypatch.setattr("inspect_sentinel.sidecar._handler.edit_reply", unable)
+    handler = Handler(weather_rule("modify", "Tokyo"))
+    await handler.request(request())
+
+    with pytest.raises(ModifyError):
         await handler.reply(reply(message(weather("Tokyo"))))
 
 

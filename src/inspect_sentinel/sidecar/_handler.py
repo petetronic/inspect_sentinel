@@ -119,6 +119,10 @@ def _not_judged(ex: Exception) -> NotJudged:
     return "error"
 
 
+class ModifyError(Exception):
+    """The sentinel decided to change a tool call that the sidecar can't change in the reply, such as one that is not a function call, so the reply was not judged."""
+
+
 class TimeLimitError(TimeoutError):
     """The sentinel didn't finish judging a request or a reply within the handler's time limit, and was cancelled."""
 
@@ -227,7 +231,7 @@ class Handler:
 
         Raises:
             UnreadableError: If the reply can't be read, or answers a request this handler was never shown or no longer keeps.
-            NotImplementedError: If the sentinel decides `modify`, which a sidecar can't carry out yet.
+            ModifyError: If the sentinel decides `modify` of a call the sidecar can't change, and rejects none of the turn's calls.
             TimeLimitError: If the handler has a time limit and the sentinel didn't finish within it.
         """
         held = await self._state.release(reply.id)
@@ -465,8 +469,10 @@ class Handler:
             attempt=attempt,
         )
         said = call_texts(request.provider, request.body, request.format)
+        # a changed call's result is of the call that ran, whichever the client holds
+        ran = {id: call for turn in edited for id, call in turn.modified.items()}
         ended = await self._results(
-            held, run, conversation, client, said, amended.restored
+            held, run, conversation, client, said, amended.restored, ran
         )
         if ended is not None:
             return self._with_field(ended, proxy, held.exchange, run)
@@ -504,6 +510,7 @@ class Handler:
         client: list[ChatMessage],
         said: Mapping[str, Sequence[str]],
         restored: frozenset[str] = frozenset(),
+        ran: Mapping[str, ToolCall] | None = None,
     ) -> Refuse | None:
         if AfterToolCall not in self._watched:
             return None
@@ -533,6 +540,7 @@ class Handler:
                     f"The request holds a result for a call it doesn't hold: {entry.tool_call_id!r}."
                 )
             assistant, call, words, index = found
+            call = (ran or {}).get(call.id, call)
             # A call's place among those with its id tells it apart from the
             # others, as a client can use one id for calls in different
             # turns. A conversation that lost calls with its id, to
@@ -647,6 +655,7 @@ class Handler:
         # the reply is still read, and kept as passed, when no call is judged
         calls = (message.tool_calls or []) if BeforeToolCall in self._watched else []
         rejected: list[tuple[ToolCall, Decision]] = []
+        modified: dict[str, ToolCall] = {}
         for call in calls:
             step = BeforeToolCall(
                 conversation=held.conversation,
@@ -662,30 +671,33 @@ class Handler:
                 continue
             if decision.action == "terminate":
                 return self._end(held, run, f"at the call to {call.function}")
-            if decision.action != "reject":
-                raise NotImplementedError(
-                    f"A sidecar can't carry out a {decision.action!r} decision yet."
-                )
-            # the client is never handed the call
+            # the client is never handed the call as the model proposed it
             held.exchange.judged[-1].original = call
-            rejected.append((call, decision))
+            if decision.action == "modify" and decision.modified is not None:
+                modified[call.id] = decision.modified
+            else:
+                rejected.append((call, decision))
         # another exchange of the run may have ended it while this one waited
         refusal = _ended(run, held.marks)
         if refusal is not None:
             return refusal
-        if rejected:
-            taken = {call.id for call, _ in rejected}
-            if all(call.id in taken for call in message.tool_calls or []):
-                return self._reject(held, run, conversation, message, noted, rejected)
-            try:
-                return await self._edit(
-                    reply, held, run, conversation, output, start, noted, rejected
-                )
-            except UnreadableError:
-                # the reply couldn't be edited as the sentinel decided, so the
-                # turn is refused whole, as it was before calls could be taken out
-                return self._reject(held, run, conversation, message, noted, rejected)
-        return self._passed(held, run, conversation, message)
+        if not rejected and not modified:
+            return self._passed(held, run, conversation, message)
+        taken = {call.id for call, _ in rejected}
+        if all(call.id in taken for call in message.tool_calls or []):
+            return self._reject(held, run, conversation, message, noted, rejected)
+        try:
+            return await self._edit(
+                reply, held, run, conversation, output, start, noted, rejected, modified
+            )
+        except UnreadableError as ex:
+            if not rejected:
+                raise ModifyError(
+                    "The sentinel changed a call this sidecar can't change in the reply."
+                ) from ex
+            # the reply couldn't be edited as the sentinel decided, so the turn
+            # is refused whole, as it was before calls could be taken out
+            return self._reject(held, run, conversation, message, noted, rejected)
 
     def _passed(
         self,
@@ -723,31 +735,36 @@ class Handler:
         start: JsonValue | None,
         noted: JsonValue | None,
         rejected: Sequence[tuple[ToolCall, Decision]],
+        modified: Mapping[str, ToolCall],
     ) -> Replace:
-        # the rejected calls are taken out and the rest of the turn goes on, as
-        # in Inspect's own process, where the other calls in a turn still run
+        # The rejected calls are taken out and the changed calls go out
+        # changed, and the rest of the turn goes on, as in Inspect's own
+        # process, where the other calls in a turn still run. The model's
+        # message keeps its own calls there, so later requests have them put
+        # back.
         message = output.message
         reasons = {
             call.id: decision.message or _REJECTED for call, decision in rejected
         }
-        written = await amendments(held.format, message, reasons, (), noted)
+        written = await amendments(held.format, message, reasons, modified, noted)
         body = await edit_reply(
             reply.provider,
             reply.content_type,
             reply.body,
             reply.format,
-            Edits(frozenset(reasons)),
+            Edits(frozenset(reasons), modified),
             output,
             start=start,
         )
+        calls = message.tool_calls or []
         conversation.edited.append(
             Edited(
                 sent=held.sent,
                 mark=held.mark,
-                order=tuple(call.id for call in message.tool_calls or []),
+                order=tuple(call.id for call in calls),
                 taken_out=reasons,
-                originals={},
-                modified={},
+                originals={call.id: call for call in calls if call.id in modified},
+                modified=dict(modified),
                 amendments=written,
             )
         )
@@ -755,7 +772,9 @@ class Handler:
         handed = message.model_copy(
             update={
                 "tool_calls": [
-                    call for call in message.tool_calls or [] if call.id not in reasons
+                    modified.get(call.id, call)
+                    for call in calls
+                    if call.id not in reasons
                 ]
             }
         )
