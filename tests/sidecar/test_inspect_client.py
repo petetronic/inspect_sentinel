@@ -191,6 +191,7 @@ async def test_a_refused_turn_carries_the_rejected_call_and_what_was_recorded(
     assert _stages(dict(answer.sentinel)) == [
         ("tool_call", "proceed"),
         ("tool_call", "reject"),
+        ("tool_call", "proceed"),
     ]
     # the whole turn is withheld, every call in it, with what the model is told
     # of each when the sidecar adds it to the next request
@@ -209,7 +210,7 @@ async def test_a_refused_turn_carries_the_rejected_call_and_what_was_recorded(
             2
         ].id: "This call was not run, because another call in the same turn was rejected.",
     }
-    rejected = answer.sentinel["steps"][-1]
+    rejected = answer.sentinel["steps"][1]
     assert rejected["original"]["function"] == "get_weather"
     assert rejected["original"]["arguments"] == {"location": city}
     assert rejected["original"]["id"] == rejected["call"]
@@ -223,8 +224,9 @@ async def test_a_refused_turn_carries_the_rejected_call_and_what_was_recorded(
         for record in rejected["recorded"]
     ] == [("record", "", "weather_rule", rejected["call"])]
     assert rejected["recorded"][0]["report"] == rejected["decision"]
-    # a call the client is handed as proposed has no original
-    assert "original" not in answer.sentinel["steps"][-2]
+    # only a rejected call has an original
+    assert "original" not in answer.sentinel["steps"][0]
+    assert "original" not in answer.sentinel["steps"][2]
 
 
 @pytest.mark.anyio
@@ -518,7 +520,7 @@ async def test_without_eval_results_only_what_inspect_acts_on_is_sent() -> None:
     assert answer.sentinel is not None
     assert answer.sentinel["trimmed"] is True
     assert all("recorded" not in step for step in answer.sentinel["steps"])
-    rejected = answer.sentinel["steps"][-1]
+    rejected = answer.sentinel["steps"][1]
     assert rejected["decision"] == {
         "action": "reject",
         "message": "Tokyo is not allowed.",

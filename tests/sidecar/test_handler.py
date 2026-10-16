@@ -78,7 +78,7 @@ async def test_recorded_reply_is_judged_call_by_call(
 
 
 @pytest.mark.anyio
-async def test_first_refused_call_ends_the_judging() -> None:
+async def test_every_call_is_judged_after_a_rejected_one() -> None:
     handler = Handler(weather_rule("reject", "Tokyo"))
     await handler.request(request())
 
@@ -88,10 +88,11 @@ async def test_first_refused_call_ends_the_judging() -> None:
     records = await handler.records("x")
     assert records is not None
     calls = (await read_reply("anthropic", STREAM, body)).message.tool_calls or []
-    # Paris and Tokyo were judged; Lima, after the refusal, was not
+    # Lima too, after Tokyo was rejected, as in Inspect's own process
     assert [(record.stage, record.call) for record in records] == [
         ("tool_call", calls[0].id),
         ("tool_call", calls[1].id),
+        ("tool_call", calls[2].id),
     ]
 
 
@@ -503,7 +504,69 @@ async def test_explanation_never_reaches_the_client() -> None:
     answer = await handler.reply(reply(message(weather("Oslo"))))
 
     assert answer == Refuse(
-        400, "A sentinel rejected the call to get_weather: This call was rejected."
+        400, "A sentinel rejected the call to get_weather: Tool call not approved."
+    )
+
+
+@protocol
+def city_rule() -> Protocol:
+    """Reject a lookup of Tokyo or Lima, each with a reason of its own, end the run at Oslo, and let everything else go."""
+
+    async def decide(context: Context, step: BeforeToolCall) -> Decision | None:
+        city = step.call.arguments.get("location")
+        if city in ("Tokyo", "Lima"):
+            return Decision.reject(f"lookup of {city}", message=f"Not {city}.")
+        if city == "Oslo":
+            return Decision.terminate("lookup of Oslo")
+        return Decision.proceed()
+
+    return decide
+
+
+@pytest.mark.anyio
+async def test_every_call_of_a_turn_is_judged_and_told_its_own_reason() -> None:
+    handler = Handler(city_rule())
+    first = request("a")
+    await handler.request(first)
+
+    refused = await handler.reply(
+        reply(
+            message(
+                weather("Tokyo", "toolu_1"),
+                weather("Paris", "toolu_2"),
+                weather("Lima", "toolu_3"),
+            ),
+            id="a",
+        )
+    )
+    again = await handler.request(request("b"))
+
+    # the client is refused with the first rejection
+    assert refused == Refuse(
+        400, "A sentinel rejected the call to get_weather: Not Tokyo."
+    )
+    assert isinstance(again, Replace)
+    results = _messages(again.body)[-1]["content"]
+    assert {block["tool_use_id"]: block["content"] for block in results} == {
+        "toolu_1": "Not Tokyo.",
+        "toolu_2": (
+            "This call was not run, because another call in the same turn was rejected."
+        ),
+        "toolu_3": "Not Lima.",
+    }
+
+
+@pytest.mark.anyio
+async def test_a_call_after_a_rejected_one_can_end_the_run() -> None:
+    handler = Handler(city_rule())
+    await handler.request(request("a"))
+
+    answer = await handler.reply(
+        reply(message(weather("Tokyo", "toolu_1"), weather("Oslo", "toolu_2")), id="a")
+    )
+
+    assert answer == Refuse(
+        400, "A sentinel ended this run at the call to get_weather."
     )
 
 

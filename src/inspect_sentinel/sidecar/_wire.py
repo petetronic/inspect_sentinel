@@ -224,9 +224,11 @@ async def add_rejections(
     sent: list[Any] = []
     for count in range(len(entries) + 1):
         for message, told, noted in rejected.get(count, ()):
+            # as inspect_ai writes a rejected call's result: no content, and
+            # the reason as an approval error, which each format writes out
             results = [
                 ChatMessageTool(
-                    content=told[call.id],
+                    content="",
                     tool_call_id=call.id,
                     function=call.function,
                     error=ToolCallError("approval", told[call.id]),

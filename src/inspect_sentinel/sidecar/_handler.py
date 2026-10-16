@@ -74,7 +74,8 @@ from ._wire import (
 # it: a model that keeps proposing rejected calls would otherwise never stop
 _MAX_CONSECUTIVE_REJECTIONS = 3
 
-_REJECTED = "This call was rejected."
+# what inspect_ai tells the model of a rejected call that has no message
+_REJECTED = "Tool call not approved."
 _NOT_RUN = "This call was not run, because another call in the same turn was rejected."
 
 
@@ -211,7 +212,7 @@ class Handler:
     async def reply(self, reply: Reply) -> Answer:
         """Judge a reply before the proxy passes any of it on.
 
-        The reply is put to the sentinel as an `AfterGenerate` step, then each tool call in it as a `BeforeToolCall` step, in order, leaving out a stage nothing in the sentinel watches. The first call that is rejected refuses the whole turn, and the rejection is kept for the later requests of its conversation. The third rejected turn in a row ends the run. A provider's error is passed on unjudged.
+        The reply is put to the sentinel as an `AfterGenerate` step, then each tool call in it as a `BeforeToolCall` step, in order, leaving out a stage nothing in the sentinel watches. Every call is judged, as in Inspect's own process, unless one ends the run. A turn with a rejected call is refused whole, and its rejections are kept for the later requests of its conversation. The third rejected turn in a row ends the run. A provider's error is passed on unjudged.
 
         For an Inspect client, a reply that goes on is answered with `Replace`, the reply with the `sentinel` field added, and a refusal carries the field. The field holds every step judged during the exchange, the request's first.
 
@@ -618,6 +619,7 @@ class Handler:
         message = output.message
         # the reply is still read, and kept as passed, when no call is judged
         calls = (message.tool_calls or []) if BeforeToolCall in self._watched else []
+        rejected: list[tuple[ToolCall, Decision]] = []
         for call in calls:
             step = BeforeToolCall(
                 conversation=held.conversation,
@@ -637,13 +639,16 @@ class Handler:
                 raise NotImplementedError(
                     f"A sidecar can't carry out a {decision.action!r} decision yet."
                 )
-            # the turn is refused, so the client is never handed the call
+            # the client is never handed the call
             held.exchange.judged[-1].original = call
-            # another exchange of the run may have ended it while this one waited
-            return _ended(run, held.marks) or self._reject(
-                held, run, conversation, message, noted, call, decision
-            )
-        return _ended(run, held.marks) or self._passed(held, run, conversation, message)
+            rejected.append((call, decision))
+        # another exchange of the run may have ended it while this one waited
+        refusal = _ended(run, held.marks)
+        if refusal is not None:
+            return refusal
+        if rejected:
+            return self._reject(held, run, conversation, message, noted, rejected)
+        return self._passed(held, run, conversation, message)
 
     def _passed(
         self,
@@ -678,15 +683,19 @@ class Handler:
         conversation: Conversation,
         message: ChatMessageAssistant,
         noted: JsonValue | None,
-        call: ToolCall,
-        decision: Decision,
+        rejected: Sequence[tuple[ToolCall, Decision]],
     ) -> Refuse:
         # only `message` is for the agent; a decision's explanation is for the log
-        why = decision.message or _REJECTED
+        reasons = {
+            call.id: decision.message or _REJECTED for call, decision in rejected
+        }
         told = {
-            other.id: why if other.id == call.id else _NOT_RUN
+            other.id: reasons.get(other.id, _NOT_RUN)
             for other in message.tool_calls or []
         }
+        # the first rejection is the one the client is refused with
+        call, _ = rejected[0]
+        why = reasons[call.id]
         held.exchange.withheld = Withheld(message, told)
         held.exchange.message = why
         run.in_a_row += 1
@@ -698,7 +707,7 @@ class Handler:
             )
         # a client that comes back after a rejection sends the same request, so
         # its rejected turns in a row share a point
-        rejected = next(
+        point = next(
             (
                 known
                 for known in conversation.rejected
@@ -706,10 +715,10 @@ class Handler:
             ),
             None,
         )
-        if rejected is None:
-            rejected = Rejected(held.sent, held.mark, [])
-            conversation.rejected.append(rejected)
-        rejected.turns.append((message, told, noted))
+        if point is None:
+            point = Rejected(held.sent, held.mark, [])
+            conversation.rejected.append(point)
+        point.turns.append((message, told, noted))
         return Refuse(
             self._reject_status,
             f"A sentinel rejected the call to {call.function}: {why}",

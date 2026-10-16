@@ -277,7 +277,7 @@ async def responses_rejected_turn(
         and cast("dict[str, Any]", entry).get("type") == "computer_call_output"
     }
     told = [
-        f"{result.tool_call_id}: {result.text}"
+        f"{result.tool_call_id}: {result.error.message if result.error else result.text}"
         for result in results
         if result.tool_call_id in computer
     ]
