@@ -1,0 +1,16 @@
+# The example's rule, as a package the sidecar's image installs. inspect_ai
+# finds its monitors and protocols through the entry point, by the name
+# weather_rules/<name>.
+[project]
+name = "weather-rules"
+version = "0.1.0"
+description = "The always_sunny example's rule: it's always sunny in Philadelphia."
+requires-python = ">=3.11"
+dependencies = ["inspect_sentinel"]
+
+[project.entry-points.inspect_ai]
+weather_rules = "weather_rules"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

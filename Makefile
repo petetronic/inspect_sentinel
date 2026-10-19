@@ -28,6 +28,25 @@ test-litellm:
 check-litellm:
 	$(LITELLM_ENV) --with pyright pyright
 
+# The Middleman hook is a package of its own too, which runs in Middleman's
+# process. Middleman is not a package, so its tests hand the hook what
+# Middleman would. Its tests start a real sidecar from this repository's
+# environment, so run `uv sync` first. `LOWEST=1` tests it with the lowest
+# versions of its dependencies that its pyproject.toml allows, which are
+# Middleman's own.
+MIDDLEMAN_LOWEST = $(if $(LOWEST),--with "aiohttp==3.9.5" --with "fastapi==0.92.0")
+MIDDLEMAN_ENV = cd src/proxies/middleman && uv run --isolated --no-project \
+	--with-editable . $(MIDDLEMAN_LOWEST) --with pytest --with pytest-timeout \
+	--with jsonschema --with uvicorn
+
+.PHONY: test-middleman
+test-middleman:
+	$(MIDDLEMAN_ENV) pytest
+
+.PHONY: check-middleman
+check-middleman:
+	$(MIDDLEMAN_ENV) --with pyright pyright
+
 .PHONY: docs
 docs:
 	cd docs && PATH="$(CURDIR)/.venv/bin:$$PATH" ../.venv/bin/quarto render

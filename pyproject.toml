@@ -143,8 +143,8 @@ timeout = 120
 
 [tool.pyright]
 # src/proxies is left out: a proxy hook imports its proxy, which is never in
-# this environment. `make check-litellm` checks the LiteLLM guardrail in one
-# of its own.
+# this environment. `make check-litellm` and `make check-middleman` check
+# the LiteLLM guardrail and the Middleman hook, each in one of its own.
 include = ["src/inspect_sentinel", "tests", "examples"]
 typeCheckingMode = "strict"
 pythonPlatform = "All"

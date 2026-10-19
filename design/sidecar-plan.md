@@ -169,9 +169,9 @@ Repository: `inspect_ai`. Depends on: nothing. Each can be its own pull request,
 
 Repositories: `inspect_sentinel` and `hawk`. Depends on: PRs 3 and 5, and METR accepting Middleman's passthrough hook.
 
-- In `inspect_sentinel`: `MiddlemanHook`, a package under `src/proxies/middleman`, calling `judge_request` and `judge_reply`, passing on and removing Inspect's two headers, and putting the `sentinel` field into Middleman's errors.
+- In `inspect_sentinel`: `MiddlemanHook`, a package under `src/proxies/middleman`, calling `judge_request` and `judge_reply` and passing on Inspect's two headers. Middleman never sends a caller's `x-` headers to a provider, so the hook removes nothing. Then putting the `sentinel` field into Middleman's errors, once Middleman lets it through.
 - In `hawk`: the passthrough hook in Middleman, which is METR's to accept; Middleman letting the `sentinel` field through on its errors; and routing `/sentinel/*` to the sidecar at the load balancer in front of Middleman.
-- A README for the hook, including the load balancer's routing.
+- A README for the hook, including the load balancer's routing, and an example that runs a task through Middleman and the sidecar.
 
 ## PR 11: the Envoy shim
 

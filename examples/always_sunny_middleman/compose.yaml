@@ -1,0 +1,87 @@
+# The always_sunny example end to end through Middleman: Middleman, the
+# sidecar deciding for it, and a local sign-in. See README.md.
+#
+# Middleman is built from a checkout of hawk whose Middleman has the
+# passthrough hook, found at HAWK_DIR (default: a `hawk` directory beside this
+# repository).
+services:
+  # Signs a token for you on each start and serves the public key Middleman
+  # checks it against. It runs in Middleman's image for its signing library.
+  signin:
+    image: always-sunny-middleman
+    pull_policy: never
+    depends_on:
+      middleman-image:
+        condition: service_completed_successfully
+    user: "0"
+    entrypoint: ["python", "/signin/signin.py"]
+    working_dir: /stack
+    volumes:
+      - ./signin.py:/signin/signin.py:ro
+      - ./.stack:/stack
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18500/jwks.json')"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  # Builds Middleman's image once, for the two services that run in it.
+  middleman-image:
+    image: always-sunny-middleman
+    build:
+      context: ${HAWK_DIR:-../../../hawk}/middleman
+      target: prod
+      additional_contexts:
+        hawk: ${HAWK_DIR:-../../../hawk}/hawk
+    entrypoint: ["true"]
+
+  middleman:
+    image: always-sunny-middleman
+    pull_policy: never
+    depends_on:
+      signin:
+        condition: service_healthy
+      sidecar:
+        condition: service_healthy
+    environment:
+      MIDDLEMAN_ENV: dev
+      MIDDLEMAN_CONFIG_FILE: /config/middleman.yaml
+      MODELS_JSON_PATH: /config/models.jsonc
+      # Middleman's passthrough hook: a class it loads at startup and calls
+      # with each request and reply. MiddlemanHook is this repository's, in a
+      # small package of its own, and sends each one to the sidecar. A
+      # Middleman image of your own would get it with `pip install
+      # inspect_sentinel_middleman`. This stack mounts the package instead,
+      # so a change to it needs only a restart.
+      MIDDLEMAN_PASSTHROUGH_HOOK: inspect_sentinel_middleman:MiddlemanHook
+      PYTHONPATH: /sentinel
+      INSPECT_SENTINEL_SIDECAR_URL: http://sidecar:8900
+      DD_TRACE_ENABLED: "false"
+      # the provider keys stay here; neither the sidecar nor your eval is
+      # given them
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    volumes:
+      # who Middleman lets in, and the models it serves
+      - ./middleman:/config:ro
+      - ../../src/proxies/middleman/inspect_sentinel_middleman:/sentinel/inspect_sentinel_middleman:ro
+    ports:
+      - 127.0.0.1:3500:3500
+
+  sidecar:
+    build:
+      context: ../..
+      dockerfile: examples/always_sunny_middleman/Dockerfile.sidecar
+    command:
+      - --sentinel
+      - /sentinel/sentinel.yaml
+      - --reject-status
+      - "503"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8900/health')"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    volumes:
+      - ./sentinel.yaml:/sentinel/sentinel.yaml:ro
+    # no port is published: only Middleman reaches the sidecar, inside the stack
