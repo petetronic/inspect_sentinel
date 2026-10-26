@@ -10,6 +10,7 @@ Each part is marked:
 - **Proposed**: suggested here, not yet agreed.
 - **Decided**: settled in this design.
 - **Waiting on**: something still needed from someone, named with it.
+- **Deferred**: proposed, and left for a later change, named with it.
 
 ## The short version
 
@@ -407,6 +408,8 @@ Each item says what this design proposes. Where something is still needed from s
 - **Waiting on:** Meridian's answer to I, for monitor state from more than one sidecar. If it is copied, it is copied from each sidecar, and Inspect fails the sample if two sentinels write the same key.
 
 ### K. Model calls that aren't the agent's
+
+- **Deferred:** not built in PR 11. The exemption below follows as its own change, after the client, once what Inspect signs and how the key reaches both sides are settled. It is off by default, so nothing in PR 11 depends on it.
 
 - Inside Inspect, the sentinel never judges a grader's calls, a scorer's, or a monitor's own model calls (Meridian's [generate-stages.md, "What is in and out"](generate-stages.md#what-is-in-and-out)). Through a sidecar, a grader's calls go without `x-inspect-context`, and the sidecar judges them like any client's, as today. That stays so until the operator turns on the exemption below.
 

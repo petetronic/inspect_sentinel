@@ -192,6 +192,7 @@ Keep the integration transparent to eval authors and preserve the existing eval 
 
 - The probe, `register_task` and the client's one setting, `auto`, `required` or `off`, at task init (section 9 and [inspect-client.md](inspect-client.md)). An answer with `fixed` true, for a task in the tasks folder, is a success.
 - `complete_registration` before each sample's first epoch, with the sample's input and metadata. The sidecar's side, with its `strictness` setting, is built ahead of the client.
+- Not in PR 11: the exemption for model calls that aren't the agent's ([inspect-client.md, K](inspect-client.md#k-model-calls-that-arent-the-agents)). It follows as its own change, after the client, once what Inspect signs and how the key reaches both sides are settled. It is off by default, so nothing in PR 11 depends on it.
 - Any subset of a registered task's samples is valid. An eval that runs only some of the samples in the tasks folder, chosen with `--sample-id`, `--limit` or any other selection, runs them as usual.
 - `x-inspect-context` and `x-irid` on each model request, only after the probe found a sentinel.
 - Reading the `sentinel` field in each provider: on a reply, in the last event of a stream, and on an error, including where LiteLLM nests it (section 1).
