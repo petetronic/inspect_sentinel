@@ -456,7 +456,7 @@ class Handler:
             kept.samples = {
                 id: sample
                 for id, sample in before.samples.items()
-                if id in registration.sample_ids
+                if id in kept.sample_ids
             }
         if not await self._state.register(
             eval_id, registration.task, kept, granted, self._max_task_registrations
@@ -492,12 +492,12 @@ class Handler:
             raise UnknownTaskError(
                 f"This sidecar holds no registration of the task {task!r} by the eval {eval_id!r}. Register the task, then complete the sample's registration."
             )
-        if sample.sample_id not in kept.registration.sample_ids:
+        if sample.sample_id not in kept.sample_ids:
             if self._strictness == "registered_only":
                 raise RegistrationError(
                     f"This sidecar takes only the samples a task's registration names, and the registration of {task!r} doesn't name the sample {sample.sample_id!r}."
                 )
-            kept.registration.sample_ids.append(sample.sample_id)
+            kept.sample_ids.add(sample.sample_id)
         kept.samples[sample.sample_id] = sample
         return False
 
@@ -529,9 +529,9 @@ class Handler:
                     raise UnregisteredSampleError(
                         f"This sidecar judges only the samples it holds, and the registration of {sample.task!r} isn't complete for the sample {sample.sample_id!r}."
                     )
-                if sample.epoch > kept.registration.epochs:
+                if not 1 <= sample.epoch <= kept.registration.epochs:
                     raise UnregisteredSampleError(
-                        f"The registration of {sample.task!r} runs {kept.registration.epochs} epochs, not epoch {sample.epoch}."
+                        f"The registration of {sample.task!r} runs epochs 1 to {kept.registration.epochs}, not epoch {sample.epoch}."
                     )
             return found
         found = fixed.eval_context(sample)

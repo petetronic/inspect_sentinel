@@ -1,4 +1,5 @@
 import json
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -344,6 +345,28 @@ async def test_registering_a_task_again_keeps_the_samples_it_still_names() -> No
 
 
 @pytest.mark.anyio
+async def test_registering_a_large_task_again_takes_time_in_proportion() -> None:
+    # 100,000 samples took 14 seconds when each was looked up in a list
+    count = 100_000
+    registration = _registration(_TASK).model_copy(
+        update={"sample_ids": list(range(count))}
+    )
+    handler = Handler(reports_the_eval())
+    await handler.register_task("eval_789", registration)
+    kept = await handler._state.registration("eval_789", "philadelphia")
+    assert kept is not None
+    kept.samples = {
+        id: SampleFacts.model_construct(sample_id=id, sample_input="Hi.", metadata={})
+        for id in range(count)
+    }
+
+    started = time.perf_counter()
+    await handler.register_task("eval_789", registration)
+
+    assert time.perf_counter() - started < 1.0
+
+
+@pytest.mark.anyio
 async def test_a_sample_the_registration_doesnt_name_extends_it() -> None:
     added = SampleFacts(sample_id=2, sample_input="File tomorrow's report.")
     handler = Handler(reports_the_eval())
@@ -416,9 +439,18 @@ async def test_a_sidecar_that_judges_only_known_tasks_refuses_another() -> None:
         (request("a"), "has no x-inspect-context header"),
         (_asked("a", task="another"), "holds no task 'another'"),
         (_asked("a", sample_id=2), "isn't complete for the sample 2"),
-        (_asked("a", epoch=3), "runs 2 epochs, not epoch 3"),
+        (_asked("a", epoch=3), "runs epochs 1 to 2, not epoch 3"),
+        (_asked("a", epoch=0), "runs epochs 1 to 2, not epoch 0"),
+        (_asked("a", epoch=-1), "runs epochs 1 to 2, not epoch -1"),
     ],
-    ids=["no header", "another task", "a sample not completed", "another epoch"],
+    ids=[
+        "no header",
+        "another task",
+        "a sample not completed",
+        "an epoch past the last",
+        "epoch 0",
+        "a negative epoch",
+    ],
 )
 async def test_a_sidecar_that_judges_only_registered_samples_refuses_another(
     asked: Request, says: str

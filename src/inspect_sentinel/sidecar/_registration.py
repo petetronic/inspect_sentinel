@@ -99,6 +99,12 @@ class RegisteredTask:
     samples: dict[str | int, SampleFacts] = field(
         default_factory=dict[str | int, SampleFacts]
     )
+    sample_ids: set[str | int] = field(init=False)
+    """The samples the eval runs: those the registration named, and any a sample's registration added."""
+
+    def __post_init__(self) -> None:
+        # a set, as a dataset can have many samples, and each is looked up
+        self.sample_ids = set(self.registration.sample_ids)
 
     def eval_context(self, sample: InspectSample) -> EvalContext | None:
         """The sample a request names, as a sentinel is given it, or None if its registration isn't complete."""

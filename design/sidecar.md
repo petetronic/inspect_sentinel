@@ -618,7 +618,7 @@ A request can name a task or a sample the sidecar doesn't hold, or name none. Th
 | `known_tasks` | refused | judged, as any client's | judged, without `context.eval` |
 | `registered_only` | refused | refused | refused |
 
-Under `registered_only`, a request is also refused when it names an epoch past the number its task's registration gave, and a `complete_registration` is refused for a sample its task's registration doesn't name. A request without the header is any client's but an eval's agent: a grader's, or a client's other than Inspect's. So `registered_only` suits a sidecar that serves only an eval's agent.
+Under `registered_only`, a request is also refused when it names an epoch outside 1 to the number its task's registration gave, and a `complete_registration` is refused for a sample its task's registration doesn't name. A request without the header is any client's but an eval's agent: a grader's, or a client's other than Inspect's. So `registered_only` suits a sidecar that serves only an eval's agent.
 
 A refused request is not judged, and is answered as a request for a sample that the tasks folder doesn't hold is: with a 400 and no `sentinel` field. `request_result` says it was `not_judged`, with the reason `unregistered`, so an eval learns that the sample can't run there.
 
