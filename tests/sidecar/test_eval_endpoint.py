@@ -18,6 +18,7 @@ from inspect_sentinel._types import Protocol, ProtocolGroup
 from inspect_sentinel.sidecar import (
     Handler,
     Refuse,
+    Replace,
     Request,
     UnreadableError,
     _handler,
@@ -348,6 +349,8 @@ async def test_a_request_of_a_run_no_eval_names_is_decided_as_judged(
     result = await _request_result(handler)
 
     assert (result["state"], result["outcome"]) == ("decided", outcome)
+    # the field is only ever an Inspect client's
+    assert "sentinel" not in result
 
 
 def _message(city: str) -> bytes:
@@ -363,6 +366,62 @@ async def test_a_request_the_provider_failed_was_not_judged() -> None:
     result = await _request_result(handler)
 
     assert (result["state"], result["reason"]) == ("not_judged", "provider_error")
+    assert "sentinel" not in result
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("action", "city"),
+    [("reject", "Oslo"), ("reject", "Tokyo"), ("terminate", "Tokyo")],
+    ids=["proceed", "reject", "terminate"],
+)
+async def test_request_result_gives_the_field_the_client_was_sent(
+    action: str, city: str
+) -> None:
+    handler = Handler(weather_rule(action, city))
+    await handler.request(_asked("x"))
+
+    answer = await handler.reply(reply(_message("Tokyo")))
+
+    # as when the proxy didn't pass the field on
+    if isinstance(answer, Refuse):
+        sent = answer.sentinel
+    else:
+        assert isinstance(answer, Replace)
+        sent = json.loads(answer.body)["sentinel"]
+    result = await _request_result(handler)
+    assert result["sentinel"] == sent
+    assert result["sentinel"]["steps"][-1]["recorded"]
+
+
+@pytest.mark.anyio
+async def test_request_result_gives_the_field_of_a_request_refused() -> None:
+    handler = Handler(weather_rule("terminate", "Tokyo"))
+    await handler.request(_asked("x"))
+    await handler.reply(reply(_message("Tokyo")))
+
+    # the run has ended, so the next request is refused before the model
+    answer = await handler.request(_asked("y", irid="irid-2"))
+
+    assert isinstance(answer, Refuse)
+    result = await _request_result(handler, "irid-2")
+    assert result["sentinel"] == answer.sentinel
+    assert result["sentinel"]["outcome"] == "terminate"
+
+
+@pytest.mark.anyio
+async def test_request_result_trims_the_field_where_results_are_not_sent() -> None:
+    handler = Handler(weather_rule("reject", "Tokyo"))
+    await handler.request(_asked("x"))
+    await handler.reply(reply(_message("Tokyo")))
+
+    async with _client(handler, results=False) as client:
+        answered = await _call(client, "request_result", {"id": "irid-1"})
+
+    field = answered["result"]["sentinel"]
+    assert field["trimmed"] is True
+    assert all("recorded" not in step for step in field["steps"])
+    assert set(field["steps"][-1]["decision"]) <= {"action", "message", "modified"}
 
 
 @pytest.mark.anyio

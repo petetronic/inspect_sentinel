@@ -210,6 +210,11 @@ class Handler:
         return self._release
 
     @property
+    def eval_results(self) -> bool:
+        """Whether an Inspect client is sent the results, or only what it acts on."""
+        return self._eval_results
+
+    @property
     def keepalive(self) -> float | None:
         """Under early release, how many seconds a client may be sent nothing before it is sent a keepalive, or None for no keepalives."""
         return self._keepalive
@@ -567,7 +572,7 @@ class Handler:
         refusal = _ended(run, marks)
         if refusal is not None:
             # the run has ended, and the sentinel is not asked again
-            return self._with_field(refusal, proxy, Exchange(), "terminate")
+            return self._with_field(refusal, proxy, Exchange(), "terminate", attempt)
         if sample is not None:
             found = await self._eval(sample)
             if run.eval is None:
@@ -662,7 +667,7 @@ class Handler:
             held, run, conversation, client, said, restored, ran
         )
         if ended is not None:
-            return self._with_field(ended, proxy, held.exchange, "terminate")
+            return self._with_field(ended, proxy, held.exchange, "terminate", attempt)
         if BeforeGenerate in self._watched:
             before = BeforeGenerate(
                 model=held.model,
@@ -682,11 +687,12 @@ class Handler:
                     proxy,
                     held.exchange,
                     "terminate",
+                    attempt,
                 )
         # another exchange of the run may have ended it while this one waited
         refusal = _ended(run, marks)
         if refusal is not None:
-            return self._with_field(refusal, proxy, held.exchange, "terminate")
+            return self._with_field(refusal, proxy, held.exchange, "terminate", attempt)
         # the request goes on to the model, as the client sent it with what
         # this sidecar added
         record_sent(
@@ -808,7 +814,11 @@ class Handler:
             return answer
         if isinstance(answer, Refuse):
             outcome = "terminate" if held.exchange.ended else "reject"
-            return self._with_field(answer, held.proxy, held.exchange, outcome)
+            return self._with_field(
+                answer, held.proxy, held.exchange, outcome, held.attempt
+            )
+        if held.attempt is not None:
+            held.attempt.judged = held.exchange
         body = answer.body if isinstance(answer, Replace) else reply.body
         field = self._field(held.exchange, "proceed")
         try:
@@ -1111,10 +1121,14 @@ class Handler:
         proxy: ProxyContext,
         exchange: Exchange,
         outcome: Literal["reject", "terminate"],
+        attempt: Attempt | None,
     ) -> Refuse:
-        # an Inspect client is told what was decided, with the refusal
+        # an Inspect client is told what was decided, with the refusal, and
+        # again by `request_result` if the refusal doesn't reach it
         if proxy.inspect is None:
             return refusal
+        if attempt is not None:
+            attempt.judged = exchange
         return replace(refusal, sentinel=self._field(exchange, outcome))
 
     def _field(

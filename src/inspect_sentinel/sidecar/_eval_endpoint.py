@@ -13,7 +13,13 @@ from starlette.routing import Route
 
 from ._handler import Handler, RequestResult
 from ._http import read_within
-from ._inspect_client import WithheldTurn, record_json, withheld_turn
+from ._inspect_client import (
+    SentinelField,
+    WithheldTurn,
+    record_json,
+    sentinel_field,
+    withheld_turn,
+)
 from ._json_rpc import (
     METHOD_NOT_FOUND,
     REGISTRATION_REFUSED,
@@ -128,6 +134,10 @@ class RequestResultResult(BaseModel):
     proposed: WithheldTurn | None = Field(
         default=None,
         description="The model's turn as it proposed it, when the latest attempt was handed it with calls taken out because they were rejected, as the `sentinel` field holds it.",
+    )
+    sentinel: SentinelField | None = Field(
+        default=None,
+        description="The `sentinel` field of the latest attempt, once decided, as the reply or the refusal carried it, so an eval whose proxy didn't pass it on acts on it as it would have. Trimmed, as the field is, where the sidecar doesn't send results.",
     )
 
 
@@ -329,6 +339,19 @@ async def _answer(
             ),
             proposed=(
                 withheld_turn(latest.proposed) if latest.proposed is not None else None
+            ),
+            sentinel=(
+                SentinelField.model_validate(
+                    sentinel_field(
+                        latest.judged,
+                        latest.outcome,
+                        trimmed=not (results and handler.eval_results),
+                    )
+                )
+                if latest.state == "decided"
+                and latest.judged is not None
+                and latest.outcome is not None
+                else None
             ),
         )
     if isinstance(given, SampleResultParams):

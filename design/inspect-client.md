@@ -268,7 +268,7 @@ Some ways the field goes missing:
 - **Ordinary retries stay.** Inspect still retries the provider and network failures it retries today. Once `request_result` confirms that the sidecar couldn't judge a call that came back as an error, the sample fails, with no extra retry on top.
 - **None of these is permission to go on.** `dropped`, `unknown` and a failed lookup say nothing about what the sentinel decided. Under `auto`, the reply is used as it would be with no sidecar, and the transcript says the sidecar's protocol decision is unavailable.
 
-**Proposed: a fuller answer.** Today `request_result` gives the outcome and the records, but not the field's step-by-step decisions. It should give the same information as the field, so Inspect can act exactly as it would on the field. This is a change on the sidecar's side.
+**Decided: the same answer as the field.** Once the sidecar has decided, `request_result` gives the `sentinel` field the reply or refusal carried, step by step, so Inspect acts on it exactly as it would on the field ([sidecar.md, the methods](sidecar.md#the-methods)).
 
 ## 6. The end of a sample
 

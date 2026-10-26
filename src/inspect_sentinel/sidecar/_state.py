@@ -63,6 +63,9 @@ class Attempt:
     proposed: Withheld | None = None
     """The model's turn as it proposed it, when the client was handed it with calls taken out."""
 
+    judged: Exchange | None = None
+    """What was decided during the attempt, for an Inspect client, from which `request_result` writes the `sentinel` field the client was sent."""
+
     def decide(self, outcome: Outcome, message: str | None = None) -> None:
         """Mark the attempt decided."""
         self.state, self.outcome, self.message = "decided", outcome, message
