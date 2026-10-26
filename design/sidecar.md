@@ -518,7 +518,9 @@ What Inspect does with each answer depends on the mode of its sidecar setting ([
 A sentinel in the sidecar is given the sample's details as `context.eval` only when the sample's task has been registered. A task reaches the sidecar in one of two ways.
 
 - **Registered beforehand, by an admin, in the tasks folder.** Before the eval runs, the eval's tasks and their samples are put in a file, and the sidecar reads it at startup. Every task in the file is fixed: nothing can replace it, including Inspect's registration at task init. Inspect still registers the task as usual, and the sidecar answers that the task is already registered, without storing anything ("The methods" below). This is the case for secure environments. The admin can also install the task's package beside the sentinel, so that the sidecar has the task's own tool viewers ("Tool views" below). "The tasks folder" below describes it.
-- **Registered by Inspect at task init.** This is on unless a deployment turns it off, with `--no-runtime-task-registration`. A sidecar where it is off refuses Inspect's registration of a task that is not in the tasks folder ("The methods" below). Before the task's first sample starts, Inspect sends the task's facts and every sample's input and metadata.
+- **Registered by Inspect at task init.** This is on unless a deployment turns it off, with `--no-runtime-task-registration`. A sidecar where it is off refuses Inspect's registration of a task that is not in the tasks folder ("The methods" below). It happens in two steps, so that a large dataset is never sent in one call.
+
+**First, at task init, `register_task`.** Before the task's first sample starts, Inspect sends the task's facts, the ids of the samples it selected for this run, and the number of epochs:
 
 ```json
 {
@@ -531,19 +533,33 @@ A sentinel in the sidecar is given the sample's details as `context.eval` only w
     "task_description": null,
     "metadata": {},
     "expiry": 604800,
-    "samples": [
-      {
-        "sample_id": 1,
-        "sample_description": null,
-        "sample_input": "File today's weather report for Philadelphia.",
-        "metadata": {"desk": "weather"}
-      }
-    ]
+    "sample_ids": [1, 2],
+    "epochs": 3
   }
 }
 ```
 
-`metadata` is the task's own metadata. A sentinel is given it merged with each sample's metadata, as it is in Inspect's own process. A registration is kept until no request has named its task for `expiry` seconds, a day unless it says otherwise. Each model request whose `x-inspect-context` names the task, and each registration of it again, starts that time again, so a registration is never dropped while its eval is still making requests. The sidecar keeps no registration longer than `--task-expiry` allows, 30 days unless set otherwise, and its answer says when it shortened what was asked. It keeps at most `--max-task-registrations` at once, 1000 unless set otherwise, since anything that can reach the endpoint for evals can register a task. A new registration past that fails with its own error, `registrations_full`, with the code `-32008`, rather than a registration still in use being dropped to make room. It is a failure, not a refusal: the task may run there once a kept registration expires. The example asks for a week. A sample input that is a list of chat messages is sent in the JSON form inspect_ai writes messages in. A new registration for a task replaces the one the sidecar holds, unless that one is marked fixed. A replacement does not reach a run that has already started: a run takes its sample's facts at its first request and keeps them to its end. Sending the same registration again therefore has no effect, so Inspect can safely retry.
+**Then, before each sample runs, `complete_registration`.** Before a sample's first epoch, Inspect sends that sample's input and metadata. It does this once for each sample, since a sample's input is the same in every epoch:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "complete_registration",
+  "params": {
+    "eval_id": "eval_789",
+    "task": "philadelphia",
+    "sample_id": 1,
+    "sample_description": null,
+    "sample_input": "File today's weather report for Philadelphia.",
+    "metadata": {"desk": "weather"}
+  }
+}
+```
+
+Until a sample's registration is complete, its sentinel is given no `context.eval`, as for a task never registered. A sample the registration doesn't name, such as one a task adds while it runs, extends the registration, unless the sidecar takes only registered samples ("How strict the sidecar is" below).
+
+`metadata` is the task's own metadata. A sentinel is given it merged with each sample's metadata, as it is in Inspect's own process. A registration is kept until no request has named its task for `expiry` seconds, a day unless it says otherwise. Each model request whose `x-inspect-context` names the task, and each registration of it again, starts that time again, so a registration is never dropped while its eval is still making requests. The sidecar keeps no registration longer than `--task-expiry` allows, 30 days unless set otherwise, and its answer says when it shortened what was asked. It keeps at most `--max-task-registrations` at once, 1000 unless set otherwise, since anything that can reach the endpoint for evals can register a task. A new registration past that fails with its own error, `registrations_full`, with the code `-32008`, rather than a registration still in use being dropped to make room. It is a failure, not a refusal: the task may run there once a kept registration expires. The example asks for a week. A sample input that is a list of chat messages is sent in the JSON form inspect_ai writes messages in. A new registration for a task replaces the one the sidecar holds, unless that one is marked fixed. The replacement keeps each sample whose registration was complete, if it still names it. A replacement does not reach a run that has already started: a run takes its sample's facts at its first request and keeps them to its end. Sending the same registration again therefore has no effect, so Inspect can safely retry. Completing a sample's registration again replaces its facts, for the runs that start after.
 
 The sidecar stores the facts under the eval id, the task and the sample id. Each model request names those three in `x-inspect-context`, and the sidecar finds the sample's facts by them. The run is keyed by the header's `sample_uuid` (section 7), so each epoch of a sample is a run of its own, with the same registered facts.
 
@@ -553,7 +569,7 @@ The registration has no map of the task's tools. A task's tools are given to the
 
 An admin registers tasks beforehand in the tasks folder. It holds what Inspect itself would send at task init, for each task the eval runs.
 
-- **The folder holds tasks files, YAML or JSON.** Every such file directly in the folder is read, and each holds a `tasks` list, as a sentinel file holds its sentinels. Each task has the parameters of `register_task`, without `eval_id` and `expiry`:
+- **The folder holds tasks files, YAML or JSON.** Every such file directly in the folder is read, and each holds a `tasks` list, as a sentinel file holds its sentinels. Each task has the task's facts as `register_task` sends them, without `eval_id`, `expiry`, `sample_ids` and `epochs`, and a list of `samples`, each as `complete_registration` sends it, without `eval_id` and `task`:
 
   ```yaml
   tasks:
@@ -592,6 +608,22 @@ A client can still send `x-inspect-context` for samples that were never register
 
 Where a task is registered beforehand, its registration at task init fails only when the endpoint for evals cannot be reached or does not answer, and the task then stops. Whatever happens at registration, its sentinel is given the file's facts from the first request, and the sidecar refuses a request for a sample of that task that is not in the file.
 
+### How strict the sidecar is
+
+A request can name a task or a sample the sidecar doesn't hold, or name none. The setting `strictness` (`--strictness`, or `strictness` in the `server` stanza) says what the sidecar does with such a request. It has three levels:
+
+| Level | A request naming a task the sidecar doesn't hold | A request with no `x-inspect-context` | A request naming a sample whose registration isn't complete |
+| --- | --- | --- | --- |
+| `open`, the default | judged, without `context.eval` | judged, as any client's | judged, without `context.eval` |
+| `known_tasks` | refused | judged, as any client's | judged, without `context.eval` |
+| `registered_only` | refused | refused | refused |
+
+Under `registered_only`, a request is also refused when it names an epoch past the number its task's registration gave, and a `complete_registration` is refused for a sample its task's registration doesn't name. A request without the header is any client's but an eval's agent: a grader's, or a client's other than Inspect's. So `registered_only` suits a sidecar that serves only an eval's agent.
+
+A refused request is not judged, and is answered as a request for a sample that the tasks folder doesn't hold is: with a 400 and no `sentinel` field. `request_result` says it was `not_judged`, with the reason `unregistered`, so an eval learns that the sample can't run there.
+
+Only `x-inspect-context` marks a request as an eval's, and the client sets it. So `known_tasks` stops a client whose registration went wrong, but not one that leaves the header off. Telling an eval's other calls apart from a client that can't be trusted, by its credential, is later work, with [PR 15](sidecar-plan.md#pr-15-trusted-run-identity-and-termination-scopes).
+
 ### The flow, scenario by scenario
 
 Each diagram shows one scenario from start to finish. The proxy hook calls the sidecar's endpoint for proxies, at `/proxy/v1`, with `judge_request` for a request and `judge_reply` for a reply. Inspect calls the endpoint for evals, at `/sentinel/v1`, through the proxy.
@@ -607,11 +639,17 @@ sequenceDiagram
     P->>S: Forward, under the proxy's usual access control
     S-->>P: service inspect_sentinel, versions [1]
     P-->>I: Probe answer
-    I->>P: register_task: facts, samples, expiry
+    I->>P: register_task: facts, sample ids, epochs, expiry
     P->>S: Forward, under the proxy's usual access control
     Note over S: Store the task's facts under eval_id and task,<br/>or, for a task in the tasks folder, store nothing
     S-->>P: Registered
     P-->>I: Registered
+    Note over I: Before each sample's first epoch
+    I->>P: complete_registration: the sample's input and metadata
+    P->>S: Forward, under the proxy's usual access control
+    Note over S: Store the sample's facts with the task's,<br/>or, for a task in the tasks folder, store nothing
+    S-->>P: Completed
+    P-->>I: Completed
 ```
 
 **2. A turn that goes on.** Every step proceeds.
@@ -958,9 +996,9 @@ The sidecar serves two endpoints:
 
 **As an advanced option, the endpoint for evals has a port of its own**, 8901 unless set otherwise, and a token of its own, read from the `INSPECT_SENTINEL_EVAL_TOKEN` environment variable. This is for a deployment where something other than the eval can make model calls through the proxy, such as an agent that makes its own model calls ("A client that can't be trusted" below). An eval is then configured with that port's URL and the token, and sends the token as a bearer credential, in the `Authorization` header. A call without the right token is answered with HTTP 401. Inspect's first sidecar client doesn't support this port. It finds the endpoint through the model's address ([inspect-client.md](inspect-client.md), section 1).
 
-The endpoint for evals uses JSON-RPC 2.0. JSON-RPC was chosen to be consistent with inspect_ai, which already uses it to talk to the tools it runs in a sandbox and so already has the client code. Every call is a POST to one path, `/sentinel/v1`, and the body names the method. The `v1` in the path is the version of the methods. The methods are `register_task`, `request_result`, `sample_result` and `end_sample`. None of them is needed for the sidecar to make a decision. `sample_result` and `end_sample` reach only the runs an eval names, by the sample's uuid. A run no eval names is keyed by how its conversation opens, which anyone who knows the opening could work out, so the sidecar keeps such runs apart and these methods never reach them. The methods are described by a JSON Schema file, `eval_endpoint.schema.json`, generated from the endpoint's models and kept beside them. A test fails if the file is out of date.
+The endpoint for evals uses JSON-RPC 2.0. JSON-RPC was chosen to be consistent with inspect_ai, which already uses it to talk to the tools it runs in a sandbox and so already has the client code. Every call is a POST to one path, `/sentinel/v1`, and the body names the method. The `v1` in the path is the version of the methods. The methods are `register_task`, `complete_registration`, `request_result`, `sample_result` and `end_sample`. None of them is needed for the sidecar to make a decision. `sample_result` and `end_sample` reach only the runs an eval names, by the sample's uuid. A run no eval names is keyed by how its conversation opens, which anyone who knows the opening could work out, so the sidecar keeps such runs apart and these methods never reach them. The methods are described by a JSON Schema file, `eval_endpoint.schema.json`, generated from the endpoint's models and kept beside them. A test fails if the file is out of date.
 
-A call that can be read is always answered with HTTP 200, and the body says whether it succeeded, as JSON-RPC defines. A call may be as large as `--max-body-bytes` allows, 64 MiB unless set otherwise, the same limit as for the endpoint for proxies. A larger call is answered with HTTP 413. A `register_task` for a large dataset may need the limit raised, and so may any limit of the proxy's, or of a load balancer in front of it, which is the operator's to set.
+A call that can be read is always answered with HTTP 200, and the body says whether it succeeded, as JSON-RPC defines. A call may be as large as `--max-body-bytes` allows, 64 MiB unless set otherwise, the same limit as for the endpoint for proxies. A larger call is answered with HTTP 413. A registration sends one sample at a time, so only a sample with a very large input, such as one with images, may need the limit raised, and so may any limit of the proxy's, or of a load balancer in front of it, which is the operator's to set.
 
 **`register_task`.** Inspect sends a task's facts at task init, where the deployment allows it. "Registering a task" above shows the call. For a task that is not in the tasks folder, the result says what the sidecar stored, with `fixed` false:
 
@@ -998,6 +1036,28 @@ A registration for a task in the tasks folder stores nothing, whether runtime re
 `samples` is the number of samples the registration named. There is no `expiry`, because a task in the folder is never dropped. The answer shows that a task of that name is in the folder; a task's name is not treated as secret.
 
 A sidecar started with `--no-runtime-task-registration` answers a `register_task` for a task that is not in the folder with an error, with the code `-32001`.
+
+**`complete_registration`.** Inspect sends a sample's facts before its first epoch. "Registering a task" above shows the call. The result says whether the facts were stored:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "eval_id": "eval_789",
+    "task": "philadelphia",
+    "sample_id": 1,
+    "fixed": false
+  }
+}
+```
+
+For a task in the tasks folder, nothing is stored, and the result has `fixed` true. The sample is not compared with the file, for the same reason as the task's registration. A request for a sample the file doesn't hold is still refused ("The tasks folder" above).
+
+Two errors are its own:
+
+- **`unknown_task`, with the code `-32009`**, when the sidecar holds no registration of the task by this eval: it was never registered, or is no longer kept. The eval registers the task again, then completes the sample's registration.
+- **`registration_refused`, with the code `-32001`**, when the sidecar takes only registered samples and the task's registration doesn't name this one ("How strict the sidecar is" below).
 
 **`request_result`.** The eval asks what happened to one model request. It identifies the request by the id it sent with it, in Inspect's `x-irid` header:
 
@@ -1148,7 +1208,7 @@ By default, the same holds for anything else that can make model calls through t
 Four rules follow.
 
 - **No method can loosen a decision.** Every method either sends context in or reads results out. No method allows a call, clears a tally, or changes the sentinel or its configuration. Decisions are made only on the requests and replies a proxy sends. When a sentinel asks a person, that person's answer is never accepted on an eval's credential.
-- **What an eval registers is a claim, not a fact.** A compromised client could register a sample input or metadata that is false, to mislead a monitor that reads them. Section 8 says that nothing in `context.eval` came from the agent. When Inspect registers a task at task init, that is true only if the process that sent the facts can be trusted. Where it cannot be, tasks are registered beforehand, by an admin, in the tasks folder, so that nothing the eval sends can replace them ("The tasks folder" above), and the sidecar is started with `--no-runtime-task-registration`. A task that is not in the file can be registered, and replaced, by any caller that can reach the endpoint for evals.
+- **What an eval registers is a claim, not a fact.** A compromised client could register a sample input or metadata that is false, to mislead a monitor that reads them. Section 8 says that nothing in `context.eval` came from the agent. When Inspect registers a task at task init, that is true only if the process that sent the facts can be trusted. Where it cannot be, tasks are registered beforehand, by an admin, in the tasks folder, so that nothing the eval sends can replace them ("The tasks folder" above), and the sidecar is started with `--no-runtime-task-registration`, and with `--strictness registered_only` so that it judges no request for a task outside the folder ("How strict the sidecar is" above). A task that is not in the file can be registered, and replaced, by any caller that can reach the endpoint for evals.
 - **A credential works only for its own runs.** The sidecar checks that the caller is allowed to register the task, or read the run, that it names. One eval then cannot register or read another eval's. How a credential is tied to the evals it may name is not designed.
 - **Results can be withheld, and decisions still sent.** A record contains each monitor's explanation, and an explanation tells an agent what the monitor looks for. Where the client is not trusted, `--no-eval-results` turns off `sample_result`, leaves `recorded` out of `request_result`, and trims the `sentinel` field to what Inspect acts on: each step's stage, call, original call, action, agent-facing message and modified call. `request_result` is still served, with the outcome, the message, and the withheld or proposed turn, because it is how an eval learns that a turn was refused or edited when its proxy didn't pass on the field. The field says that it was trimmed, so a trimmed field is never read as a run in which the sentinel had nothing to say.
 
@@ -1159,7 +1219,6 @@ Not yet designed:
 - how Inspect's sidecar client learns of a question put to a person, and how the person's answer reaches the sidecar (section 8; scheduled in [PR 13](sidecar-plan.md#pr-13-human-review))
 - how the eval says that a sample is new or resumed
 - how a credential is tied to its runs
-- whether a sidecar that runs only the tasks in its folder also refuses a model request that names a task outside the folder, or that names no task
 - how to catch a task in the tasks folder whose samples no longer match the eval that runs it, without telling a caller whether its guess at the file is right. Comparing Inspect's registration with the file does not work as it stands: inspect_ai rewrites a sample's media paths and gives each chat message a new id when it loads a dataset, so an unchanged eval would not match
 
 Considered and not taken:
@@ -1178,6 +1237,7 @@ Considered and not taken:
       monitor: anthropic/claude-haiku-4-5
     reject_status: 503
     runtime_task_registration: false
+    strictness: registered_only
   tasks_folder: tasks
   ```
 
@@ -1188,7 +1248,7 @@ Considered and not taken:
 
   | Level | Keyed by | What is kept |
   | --- | --- | --- |
-  | Task | `eval_id` and `task`, or `task` alone for a task in the tasks folder | the registered facts: the task's description and metadata, and each sample's input, description and metadata; and, from the tasks file only, the map of tool names (section 9) |
+  | Task | `eval_id` and `task`, or `task` alone for a task in the tasks folder | the registered facts: the task's description and metadata, the ids of the samples the eval runs and the number of epochs, and each completed sample's input, description and metadata; and, from the tasks file only, the map of tool names (section 9) |
   | Run, one sample in one epoch | `sample_uuid` | the sample's facts, taken at the run's first request; the sentinel's store; whether the run was ended; open questions to a person (sections 4 and 8) |
   | Conversation, within a run | the run, and how the conversation opens | the tool results already judged, each call told apart from others with its id by how many come before it; how many calls with each id the client's conversation has held, kept for the conversation's life: a request that holds fewer was compacted, and as its results can then no longer be told apart from those judged before, it is unreadable, which arises only where a provider uses one call id more than once. An exact retry of a request whose reply was lost is refused the same way when that reply used an id again, as it cannot be told apart from a compacted request without matching each call to the reply that made it; what the model was sent for the generate that made each of the latest calls, as a tool step's `input` and `tools`; the calls that were rejected, taken out or changed, to be put back into later requests, each with what inspect_ai's converters noted when its reply was read (section 4); what the converters noted reading the conversation's replies |
   | Request | Inspect's `x-irid`, and the proxy's exchange id | where judging stands, the outcome and the records, for `request_result` (section 9) |

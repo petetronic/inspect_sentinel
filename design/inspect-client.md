@@ -124,7 +124,9 @@ Inspect calls `register_task` either way. A pre-registered task runs only sample
 
 - the eval's id
 - the task's name, description and metadata
-- each sample selected for this run, after `--limit`, `--sample-id` and the like: its id, input, description and metadata
+- the ids of the samples selected for this run, after `--limit`, `--sample-id` and the like, and the number of epochs
+
+Before each sample's first epoch, Inspect then calls `complete_registration` with the sample's input, description and metadata (F below).
 
 The sidecar gives one of four answers.
 

@@ -191,6 +191,7 @@ Scheduled after PR 10. The initial client uses whole-response holding; support f
 Keep the integration transparent to eval authors and preserve the existing eval and task interfaces. "Inspect client for the sidecar" describes its responsibility, without prescribing a public type or a choice users must make between local and remote execution. Its internal names, structure and any necessary deployment configuration are for Meridian to agree.
 
 - The probe, `register_task` and the client's one setting, `auto`, `required` or `off`, at task init (section 9 and [inspect-client.md](inspect-client.md)). An answer with `fixed` true, for a task in the tasks folder, is a success.
+- `complete_registration` before each sample's first epoch, with the sample's input and metadata. The sidecar's side, with its `strictness` setting, is built ahead of the client.
 - Any subset of a registered task's samples is valid. An eval that runs only some of the samples in the tasks folder, chosen with `--sample-id`, `--limit` or any other selection, runs them as usual.
 - `x-inspect-context` and `x-irid` on each model request, only after the probe found a sentinel.
 - Reading the `sentinel` field in each provider: on a reply, in the last event of a stream, and on an error, including where LiteLLM nests it (section 1).
