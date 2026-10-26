@@ -44,6 +44,7 @@ from ._history import record_sent
 from ._host import Record, RunHost, SidecarHost, stage
 from ._inspect_ai import VIEWED_TOOLS, tool_call_view
 from ._inspect_client import (
+    INSPECT_CONTEXT,
     Exchange,
     Judged,
     Withheld,
@@ -56,9 +57,13 @@ from ._registration import (
     MAX_TASK_REGISTRATIONS,
     TASK_EXPIRY,
     FileTask,
+    RegisteredTask,
     RegistrationError,
     RegistrationsFullError,
-    TaskFacts,
+    SampleFacts,
+    Strictness,
+    TaskRegistration,
+    UnknownTaskError,
     UnregisteredSampleError,
 )
 from ._reply_stream import KEEPALIVE_SECONDS, PENDING_BYTES, ReplyStart, ReplyStream
@@ -150,6 +155,7 @@ class Handler:
         eval_results: bool = True,
         tasks: Mapping[str, FileTask] | None = None,
         runtime_task_registration: bool = True,
+        strictness: Strictness = "open",
         task_expiry: float = MAX_TASK_EXPIRY,
         max_task_registrations: int = MAX_TASK_REGISTRATIONS,
         release: Literal["whole", "early"] = "whole",
@@ -166,6 +172,7 @@ class Handler:
             eval_results: Whether an Inspect client's `sentinel` field holds the results: the explanations, references and metadata of the decisions, and what each monitor and protocol recorded. Without them, it holds only what Inspect acts on. A monitor's explanation tells an agent what the monitor looks for, so a client that can't be trusted is not sent them.
             tasks: Tasks registered beforehand, by name, as the tasks folder's files hold them. Nothing an eval registers replaces one, and a request for a sample one doesn't hold is refused.
             runtime_task_registration: Whether an eval may register its tasks itself, at task init.
+            strictness: How strict the handler is about a request it can't place. `open`, the default, judges every request, without the task's facts where it holds none. `known_tasks` refuses a request whose `x-inspect-context` names a task the handler doesn't hold, and judges one without the header. `registered_only` refuses any request that doesn't name a sample the handler holds, in an epoch the task's registration runs, including one without the header, and refuses a sample's registration that the task's registration doesn't name.
             task_expiry: The longest a task an eval registered is kept once no request has named it, in seconds, whatever the registration asks.
             max_task_registrations: How many tasks registered by evals are kept at once. A registration past it is refused.
             release: How a streamed reply is passed on. `whole`, the default, holds every reply until the sentinel has judged it. `early` passes on the text and reasoning that come before the turn's first tool call as they arrive, holds the rest of the turn, and judges it once the turn has ended, as `whole` does. The sentinel is given the whole turn either way.
@@ -190,6 +197,7 @@ class Handler:
         self._eval_results = eval_results
         self._tasks = dict(tasks or {})
         self._runtime_task_registration = runtime_task_registration
+        self._strictness: Strictness = strictness
         self._task_expiry = task_expiry
         self._max_task_registrations = max_task_registrations
         # the tool results being judged now, by run, conversation and digest,
@@ -224,7 +232,7 @@ class Handler:
 
         Raises:
             UnreadableError: If the request can't be read, so neither it nor its reply could be judged.
-            UnregisteredSampleError: If the request names a sample that a task registered beforehand doesn't hold.
+            UnregisteredSampleError: If the request names a sample that a task registered beforehand doesn't hold, or the handler's strictness refuses a request it can't place.
             TimeLimitError: If the handler has a time limit and the sentinel didn't finish within it.
         """
         id = request.headers.get(REQUEST_ID)
@@ -410,15 +418,15 @@ class Handler:
         return await self._state.records(id)
 
     async def register_task(
-        self, eval_id: str, facts: TaskFacts, expiry: float | None = None
+        self, eval_id: str, registration: TaskRegistration, expiry: float | None = None
     ) -> float | None:
-        """Keep a task an eval registered, so that its runs' sentinels are told which sample each is.
+        """Keep a task an eval registered, so that its runs' sentinels are told which sample each is, once each sample's registration is complete.
 
-        A registration replaces the eval's last one for the task. A run that has already found its sample keeps what it found.
+        A registration replaces the eval's last one for the task, and keeps the samples whose registration was complete that it still names, so that registering again has no effect. A run that has already found its sample keeps what it found.
 
         Args:
             eval_id: The eval's id, as its requests name it.
-            facts: The task and its samples.
+            registration: The task, and the samples it runs.
             expiry: How long to keep it once no request has named the task, in seconds. A day if not given.
 
         A task registered beforehand is already registered, so its registration stores nothing and is not compared with the file, since the answer would tell a caller whether its guess at the file is right. This holds whether or not the handler takes registrations from evals.
@@ -430,20 +438,63 @@ class Handler:
             RegistrationError: If the handler takes no registrations from evals and the task was not registered beforehand.
             RegistrationsFullError: If the handler already keeps as many registrations as it takes.
         """
-        if facts.task in self._tasks:
+        if registration.task in self._tasks:
             return None
         if not self._runtime_task_registration:
             raise RegistrationError(
                 "This sidecar takes no tasks registered by an eval."
             )
         granted = min(expiry if expiry is not None else TASK_EXPIRY, self._task_expiry)
+        kept = RegisteredTask(registration)
+        before = await self._state.registration(eval_id, registration.task)
+        if before is not None:
+            kept.samples = {
+                id: sample
+                for id, sample in before.samples.items()
+                if id in registration.sample_ids
+            }
         if not await self._state.register(
-            eval_id, facts.task, facts, granted, self._max_task_registrations
+            eval_id, registration.task, kept, granted, self._max_task_registrations
         ):
             raise RegistrationsFullError(
                 f"This sidecar already keeps the {self._max_task_registrations} tasks registered by evals that it takes. One is taken again once a kept task expires."
             )
         return granted
+
+    async def complete_registration(
+        self, eval_id: str, task: str, sample: SampleFacts
+    ) -> bool:
+        """Keep a sample's facts, before the sample's first epoch, so that its runs' sentinels are told them.
+
+        Completing a sample's registration again replaces its facts, for the runs that start after. A sample the task's registration doesn't name, such as one a task adds while it runs, extends the registration, unless the handler is `registered_only`. A task registered beforehand already holds its samples, so nothing is stored, and the sample is not compared with the file, since the answer would tell a caller whether its guess at the file is right.
+
+        Args:
+            eval_id: The eval's id, as its requests name it.
+            task: The task's name.
+            sample: The sample.
+
+        Returns:
+            Whether the task was registered beforehand, so nothing was stored.
+
+        Raises:
+            UnknownTaskError: If the eval hasn't registered the task, or its registration is no longer kept.
+            RegistrationError: If the handler is `registered_only` and the task's registration doesn't name the sample.
+        """
+        if task in self._tasks:
+            return True
+        kept = await self._state.registration(eval_id, task)
+        if kept is None:
+            raise UnknownTaskError(
+                f"This sidecar holds no registration of the task {task!r} by the eval {eval_id!r}. Register the task, then complete the sample's registration."
+            )
+        if sample.sample_id not in kept.registration.sample_ids:
+            if self._strictness == "registered_only":
+                raise RegistrationError(
+                    f"This sidecar takes only the samples a task's registration names, and the registration of {task!r} doesn't name the sample {sample.sample_id!r}."
+                )
+            kept.registration.sample_ids.append(sample.sample_id)
+        kept.samples[sample.sample_id] = sample
+        return False
 
     def _view(self, call: ToolCall, run: Run) -> ToolCallView:
         # A request names a tool only by the name the model sees. A task
@@ -460,8 +511,24 @@ class Handler:
         # counts as the task being named, so its registration is kept
         fixed = self._tasks.get(sample.task)
         if fixed is None:
-            facts = await self._state.registration(sample.eval_id, sample.task)
-            return facts.eval_context(sample) if facts is not None else None
+            kept = await self._state.registration(sample.eval_id, sample.task)
+            if kept is None:
+                if self._strictness != "open":
+                    raise UnregisteredSampleError(
+                        f"This sidecar judges only the requests of tasks it holds, and holds no task {sample.task!r} of the eval {sample.eval_id!r}."
+                    )
+                return None
+            found = kept.eval_context(sample)
+            if self._strictness == "registered_only":
+                if found is None:
+                    raise UnregisteredSampleError(
+                        f"This sidecar judges only the samples it holds, and the registration of {sample.task!r} isn't complete for the sample {sample.sample_id!r}."
+                    )
+                if sample.epoch > kept.registration.epochs:
+                    raise UnregisteredSampleError(
+                        f"The registration of {sample.task!r} runs {kept.registration.epochs} epochs, not epoch {sample.epoch}."
+                    )
+            return found
         found = fixed.eval_context(sample)
         if found is None:
             raise UnregisteredSampleError(
@@ -472,6 +539,10 @@ class Handler:
     async def _request(
         self, request: Request, sample: InspectSample | None, attempt: Attempt | None
     ) -> Answer:
+        if sample is None and self._strictness == "registered_only":
+            raise UnregisteredSampleError(
+                f"This sidecar judges only the requests of samples it holds, and the request has no {INSPECT_CONTEXT} header."
+            )
         proxy = ProxyContext(
             provider=request.provider,
             model=request.model,

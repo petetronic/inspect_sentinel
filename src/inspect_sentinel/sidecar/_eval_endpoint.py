@@ -19,13 +19,20 @@ from ._json_rpc import (
     REGISTRATION_REFUSED,
     REGISTRATIONS_FULL,
     UNKNOWN_SAMPLE,
+    UNKNOWN_TASK,
     RpcError,
     answered,
     failed,
     invalid_params,
     read_call,
 )
-from ._registration import RegistrationError, RegistrationsFullError, TaskFacts
+from ._registration import (
+    RegistrationError,
+    RegistrationsFullError,
+    SampleFacts,
+    TaskRegistration,
+    UnknownTaskError,
+)
 from ._state import NotJudged, Outcome
 
 PATH = "/sentinel/v1"
@@ -41,8 +48,8 @@ TOKEN_VARIABLE = "INSPECT_SENTINEL_EVAL_TOKEN"
 """The environment variable the endpoint's own token is read from, when it has a port of its own."""
 
 
-class RegisterTaskParams(TaskFacts):
-    """Parameters of `register_task`: a task an eval runs, and its samples, sent at task init."""
+class RegisterTaskParams(TaskRegistration):
+    """Parameters of `register_task`: a task an eval runs, and the ids of its samples, sent at task init."""
 
     eval_id: str = Field(description="The eval's id, as its requests name it.")
     expiry: float | None = Field(
@@ -64,6 +71,24 @@ class RegisterTaskResult(BaseModel):
     expiry: float | None = Field(
         default=None,
         description="How long the registration is kept once no request has named the task, in seconds: what was asked, or less if the sidecar keeps none that long. Absent when `fixed`, as a task registered beforehand is never dropped.",
+    )
+
+
+class CompleteRegistrationParams(SampleFacts):
+    """Parameters of `complete_registration`: one sample of a registered task, sent before the sample's first epoch."""
+
+    eval_id: str = Field(description="The eval's id, as its requests name it.")
+    task: str = Field(description="The task's name, as `register_task` gave it.")
+
+
+class CompleteRegistrationResult(BaseModel):
+    """That the sample's facts were stored, or that the task was registered beforehand and nothing was stored."""
+
+    eval_id: str
+    task: str
+    sample_id: str | int
+    fixed: bool = Field(
+        description="Whether the task was registered beforehand, in the tasks folder. Its sentinel is then given the folder's facts, the sample is not compared with them, and nothing is stored."
     )
 
 
@@ -145,6 +170,10 @@ class EndSampleResult(BaseModel):
 
 _METHODS: dict[str, tuple[type[BaseModel], type[BaseModel]]] = {
     "register_task": (RegisterTaskParams, RegisterTaskResult),
+    "complete_registration": (
+        CompleteRegistrationParams,
+        CompleteRegistrationResult,
+    ),
     "request_result": (RequestResultParams, RequestResultResult),
     "sample_result": (SampleResultParams, SampleResultResult),
     "end_sample": (EndSampleParams, EndSampleResult),
@@ -155,7 +184,7 @@ _RESULTS = frozenset({"sample_result"})
 _ERRORS: dict[int, tuple[str, str]] = {
     REGISTRATION_REFUSED: (
         "registration_refused",
-        "The sidecar takes no tasks registered by an eval, and this task was not registered beforehand.",
+        "The sidecar takes no tasks registered by an eval, and this task was not registered beforehand; or, for `complete_registration`, the sidecar takes only the samples a task's registration names, and this sample isn't one.",
     ),
     REGISTRATIONS_FULL: (
         "registrations_full",
@@ -164,6 +193,10 @@ _ERRORS: dict[int, tuple[str, str]] = {
     UNKNOWN_SAMPLE: (
         "unknown_sample",
         "The sidecar holds nothing for the sample, so an eval never mistakes a forgotten sample for a clean one.",
+    ),
+    UNKNOWN_TASK: (
+        "unknown_task",
+        "The sidecar holds no registration of the task by the eval: it was never registered, or is no longer kept. The eval registers the task again, then completes the sample's registration.",
     ),
 }
 
@@ -177,7 +210,7 @@ def eval_routes(
 ) -> list[Route]:
     """The routes of the endpoint for evals: the probe at `/sentinel/info`, and the methods at `/sentinel/v1`.
 
-    An eval registers its tasks, asks what became of a request and of a sample, and ends a sample once it is scored. Every call is a JSON-RPC 2.0 request. No method allows a call, clears a tally or changes the sentinel. A call larger than `max_body_bytes` is not read, and is answered with an HTTP 413.
+    An eval registers its tasks and completes each sample's registration before the sample runs, asks what became of a request and of a sample, and ends a sample once it is scored. Every call is a JSON-RPC 2.0 request. No method allows a call, clears a tally or changes the sentinel. A call larger than `max_body_bytes` is not read, and is answered with an HTTP 413.
 
     Args:
         handler: The handler the proxy's requests and replies are put to.
@@ -240,11 +273,13 @@ async def _answer(
     except ValidationError as ex:
         raise invalid_params(ex) from None
     if isinstance(given, RegisterTaskParams):
-        facts = TaskFacts.model_validate(
-            given.model_dump(include=set(TaskFacts.model_fields))
+        registration = TaskRegistration.model_validate(
+            given.model_dump(include=set(TaskRegistration.model_fields))
         )
         try:
-            granted = await handler.register_task(given.eval_id, facts, given.expiry)
+            granted = await handler.register_task(
+                given.eval_id, registration, given.expiry
+            )
         except RegistrationsFullError as ex:
             raise RpcError(REGISTRATIONS_FULL, str(ex)) from None
         except RegistrationError as ex:
@@ -252,9 +287,27 @@ async def _answer(
         return RegisterTaskResult(
             eval_id=given.eval_id,
             task=given.task,
-            samples=len(given.samples),
+            samples=len(given.sample_ids),
             fixed=granted is None,
             expiry=granted,
+        )
+    if isinstance(given, CompleteRegistrationParams):
+        sample = SampleFacts.model_validate(
+            given.model_dump(include=set(SampleFacts.model_fields))
+        )
+        try:
+            fixed = await handler.complete_registration(
+                given.eval_id, given.task, sample
+            )
+        except UnknownTaskError as ex:
+            raise RpcError(UNKNOWN_TASK, str(ex)) from None
+        except RegistrationError as ex:
+            raise RpcError(REGISTRATION_REFUSED, str(ex)) from None
+        return CompleteRegistrationResult(
+            eval_id=given.eval_id,
+            task=given.task,
+            sample_id=given.sample_id,
+            fixed=fixed,
         )
     if isinstance(given, RequestResultParams):
         found = await handler.request_result(given.id)

@@ -466,6 +466,125 @@
       "title": "ChatMessageUser",
       "type": "object"
     },
+    "CompleteRegistrationParams": {
+      "description": "Parameters of `complete_registration`: one sample of a registered task, sent before the sample's first epoch.",
+      "properties": {
+        "sample_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            }
+          ],
+          "description": "The sample's id in the dataset.",
+          "title": "Sample Id"
+        },
+        "sample_description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What is distinctive about the sample.",
+          "title": "Sample Description"
+        },
+        "sample_input": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ChatMessageSystem"
+                  },
+                  {
+                    "$ref": "#/$defs/ChatMessageUser"
+                  },
+                  {
+                    "$ref": "#/$defs/ChatMessageAssistant"
+                  },
+                  {
+                    "$ref": "#/$defs/ChatMessageTool"
+                  }
+                ]
+              },
+              "type": "array"
+            }
+          ],
+          "description": "The sample's input: a string, or chat messages as inspect_ai writes them.",
+          "title": "Sample Input"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "description": "The sample's metadata.",
+          "title": "Metadata",
+          "type": "object"
+        },
+        "eval_id": {
+          "description": "The eval's id, as its requests name it.",
+          "title": "Eval Id",
+          "type": "string"
+        },
+        "task": {
+          "description": "The task's name, as `register_task` gave it.",
+          "title": "Task",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sample_id",
+        "sample_input",
+        "eval_id",
+        "task"
+      ],
+      "title": "CompleteRegistrationParams",
+      "type": "object"
+    },
+    "CompleteRegistrationResult": {
+      "description": "That the sample's facts were stored, or that the task was registered beforehand and nothing was stored.",
+      "properties": {
+        "eval_id": {
+          "title": "Eval Id",
+          "type": "string"
+        },
+        "task": {
+          "title": "Task",
+          "type": "string"
+        },
+        "sample_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            }
+          ],
+          "title": "Sample Id"
+        },
+        "fixed": {
+          "description": "Whether the task was registered beforehand, in the tasks folder. Its sentinel is then given the folder's facts, the sample is not compared with them, and nothing is stored.",
+          "title": "Fixed",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "eval_id",
+        "task",
+        "sample_id",
+        "fixed"
+      ],
+      "title": "CompleteRegistrationResult",
+      "type": "object"
+    },
     "ContentAudio": {
       "description": "Audio content.",
       "properties": {
@@ -1096,7 +1215,7 @@
     },
     "JsonValue": {},
     "RegisterTaskParams": {
-      "description": "Parameters of `register_task`: a task an eval runs, and its samples, sent at task init.",
+      "description": "Parameters of `register_task`: a task an eval runs, and the ids of its samples, sent at task init.",
       "properties": {
         "task": {
           "description": "The task's name.",
@@ -1122,13 +1241,26 @@
           "title": "Metadata",
           "type": "object"
         },
-        "samples": {
-          "description": "Every sample of the task.",
+        "sample_ids": {
+          "description": "The ids of the samples the eval runs, after `--limit`, `--sample-id` and the like.",
           "items": {
-            "$ref": "#/$defs/SampleFacts"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ]
           },
-          "title": "Samples",
+          "title": "Sample Ids",
           "type": "array"
+        },
+        "epochs": {
+          "description": "How many epochs each sample runs.",
+          "minimum": 1,
+          "title": "Epochs",
+          "type": "integer"
         },
         "eval_id": {
           "description": "The eval's id, as its requests name it.",
@@ -1152,7 +1284,8 @@
       },
       "required": [
         "task",
-        "samples",
+        "sample_ids",
+        "epochs",
         "eval_id"
       ],
       "title": "RegisterTaskParams",
@@ -1352,76 +1485,6 @@
         "records"
       ],
       "title": "RequestResultResult",
-      "type": "object"
-    },
-    "SampleFacts": {
-      "description": "One sample of a registered task.",
-      "properties": {
-        "sample_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "integer"
-            }
-          ],
-          "description": "The sample's id in the dataset.",
-          "title": "Sample Id"
-        },
-        "sample_description": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "What is distinctive about the sample.",
-          "title": "Sample Description"
-        },
-        "sample_input": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "items": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/ChatMessageSystem"
-                  },
-                  {
-                    "$ref": "#/$defs/ChatMessageUser"
-                  },
-                  {
-                    "$ref": "#/$defs/ChatMessageAssistant"
-                  },
-                  {
-                    "$ref": "#/$defs/ChatMessageTool"
-                  }
-                ]
-              },
-              "type": "array"
-            }
-          ],
-          "description": "The sample's input: a string, or chat messages as inspect_ai writes them.",
-          "title": "Sample Input"
-        },
-        "metadata": {
-          "additionalProperties": true,
-          "description": "The sample's metadata.",
-          "title": "Metadata",
-          "type": "object"
-        }
-      },
-      "required": [
-        "sample_id",
-        "sample_input"
-      ],
-      "title": "SampleFacts",
       "type": "object"
     },
     "SampleResultParams": {
@@ -1697,6 +1760,14 @@
         "$ref": "#/$defs/RegisterTaskResult"
       }
     },
+    "complete_registration": {
+      "params": {
+        "$ref": "#/$defs/CompleteRegistrationParams"
+      },
+      "result": {
+        "$ref": "#/$defs/CompleteRegistrationResult"
+      }
+    },
     "request_result": {
       "params": {
         "$ref": "#/$defs/RequestResultParams"
@@ -1725,7 +1796,7 @@
   "errors": {
     "-32001": {
       "name": "registration_refused",
-      "description": "The sidecar takes no tasks registered by an eval, and this task was not registered beforehand."
+      "description": "The sidecar takes no tasks registered by an eval, and this task was not registered beforehand; or, for `complete_registration`, the sidecar takes only the samples a task's registration names, and this sample isn't one."
     },
     "-32008": {
       "name": "registrations_full",
@@ -1734,6 +1805,10 @@
     "-32002": {
       "name": "unknown_sample",
       "description": "The sidecar holds nothing for the sample, so an eval never mistakes a forgotten sample for a clean one."
+    },
+    "-32009": {
+      "name": "unknown_task",
+      "description": "The sidecar holds no registration of the task by the eval: it was never registered, or is no longer kept. The eval registers the task again, then completes the sample's registration."
     }
   }
 }

@@ -37,8 +37,9 @@ from inspect_sentinel.sidecar._json_rpc import (
     REGISTRATION_REFUSED,
     REGISTRATIONS_FULL,
     UNKNOWN_SAMPLE,
+    UNKNOWN_TASK,
 )
-from inspect_sentinel.sidecar._registration import FileTask
+from inspect_sentinel.sidecar._registration import FileTask, UnregisteredSampleError
 from inspect_sentinel.sidecar._serve import add_arguments, apps
 from inspect_sentinel.sidecar._state import MemoryState
 from tests.sidecar._traffic import (
@@ -58,14 +59,17 @@ _REGISTRATION: dict[str, Any] = {
     "task_description": None,
     "metadata": {},
     "expiry": 604800,
-    "samples": [
-        {
-            "sample_id": 1,
-            "sample_description": None,
-            "sample_input": "File today's weather report for Philadelphia.",
-            "metadata": {"desk": "weather"},
-        }
-    ],
+    "sample_ids": [1],
+    "epochs": 2,
+}
+
+_COMPLETION: dict[str, Any] = {
+    "eval_id": "eval_789",
+    "task": "philadelphia",
+    "sample_id": 1,
+    "sample_description": None,
+    "sample_input": "File today's weather report for Philadelphia.",
+    "metadata": {"desk": "weather"},
 }
 
 
@@ -207,15 +211,77 @@ async def test_a_registration_past_the_limit_fails_with_its_own_error() -> None:
     [
         {k: v for k, v in _REGISTRATION.items() if k != "eval_id"},
         _REGISTRATION | {"expiry": 0},
-        _REGISTRATION | {"samples": [{"sample_id": 1}]},
+        _REGISTRATION | {"epochs": 0},
     ],
-    ids=["no eval id", "no time to keep it", "a sample without input"],
+    ids=["no eval id", "no time to keep it", "no epochs"],
 )
 async def test_a_registration_that_doesnt_fit_is_an_error(
     params: dict[str, Any],
 ) -> None:
     async with _client(Handler(weather_rule())) as client:
         answered = await _call(client, "register_task", params)
+
+    assert answered["error"]["code"] == INVALID_PARAMS
+
+
+@pytest.mark.anyio
+async def test_a_samples_registration_is_completed() -> None:
+    async with _client(Handler(weather_rule())) as client:
+        await _call(client, "register_task", _REGISTRATION)
+        answered = await _call(client, "complete_registration", _COMPLETION)
+
+    assert answered["result"] == {
+        "eval_id": "eval_789",
+        "task": "philadelphia",
+        "sample_id": 1,
+        "fixed": False,
+    }
+
+
+@pytest.mark.anyio
+async def test_a_samples_registration_for_a_task_not_registered_is_its_own_error() -> (
+    None
+):
+    async with _client(Handler(weather_rule())) as client:
+        answered = await _call(client, "complete_registration", _COMPLETION)
+
+    # so an eval whose registration expired knows to register the task again
+    assert answered["error"]["code"] == UNKNOWN_TASK
+    assert "Register the task" in answered["error"]["message"]
+
+
+@pytest.mark.anyio
+async def test_a_samples_registration_for_a_task_registered_beforehand_stores_nothing() -> (
+    None
+):
+    task = FileTask.model_validate({"task": "philadelphia", "samples": []})
+    handler = Handler(weather_rule(), tasks={"philadelphia": task})
+
+    async with _client(handler) as client:
+        answered = await _call(client, "complete_registration", _COMPLETION)
+
+    assert answered["result"]["fixed"] is True
+
+
+@pytest.mark.anyio
+async def test_a_sidecar_that_takes_only_registered_samples_refuses_another() -> None:
+    async with _client(Handler(weather_rule(), strictness="registered_only")) as client:
+        await _call(client, "register_task", _REGISTRATION)
+        answered = await _call(
+            client, "complete_registration", _COMPLETION | {"sample_id": 2}
+        )
+
+    assert answered["error"]["code"] == REGISTRATION_REFUSED
+    assert "doesn't name the sample 2" in answered["error"]["message"]
+
+
+@pytest.mark.anyio
+async def test_a_samples_registration_that_doesnt_fit_is_an_error() -> None:
+    without_input = {k: v for k, v in _COMPLETION.items() if k != "sample_input"}
+
+    async with _client(Handler(weather_rule())) as client:
+        await _call(client, "register_task", _REGISTRATION)
+        answered = await _call(client, "complete_registration", without_input)
 
     assert answered["error"]["code"] == INVALID_PARAMS
 
@@ -297,6 +363,34 @@ async def test_a_request_the_provider_failed_was_not_judged() -> None:
     result = await _request_result(handler)
 
     assert (result["state"], result["reason"]) == ("not_judged", "provider_error")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "options",
+    [
+        {
+            "tasks": {
+                "philadelphia": FileTask.model_validate(
+                    {"task": "philadelphia", "samples": []}
+                )
+            }
+        },
+        {"strictness": "known_tasks"},
+    ],
+    ids=["a sample the tasks folder doesn't hold", "a task the sidecar doesn't hold"],
+)
+async def test_a_request_the_sidecar_cant_place_was_not_judged(
+    options: dict[str, Any],
+) -> None:
+    handler = Handler(weather_rule(), **options)
+
+    with pytest.raises(UnregisteredSampleError):
+        await handler.request(_asked("x"))
+
+    # how an eval learns that the sample can't run there, and not to retry it
+    result = await _request_result(handler)
+    assert (result["state"], result["reason"]) == ("not_judged", "unregistered")
 
 
 @pytest.mark.anyio
@@ -585,6 +679,7 @@ def test_schema_file_is_what_the_models_say() -> None:
 def test_calls_in_these_tests_fit_the_schema_file() -> None:
     methods = _SCHEMA["methods"]
     assert _fits(methods["register_task"]["params"], _REGISTRATION)
+    assert _fits(methods["complete_registration"]["params"], _COMPLETION)
     assert _fits(methods["request_result"]["params"], {"id": "irid-1"})
     assert not _fits(methods["request_result"]["params"], {})
 

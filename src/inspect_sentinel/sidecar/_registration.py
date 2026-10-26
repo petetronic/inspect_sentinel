@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, TypeAlias
 
 from inspect_ai.model import ChatMessage
 from pydantic import BaseModel, Field, ValidationError
@@ -27,8 +28,16 @@ class RegistrationsFullError(RegistrationError):
     """A task registration the sidecar can't take now, because it keeps as many as it takes. A failure, not a refusal: one is taken again once a kept task expires."""
 
 
+Strictness: TypeAlias = Literal["open", "known_tasks", "registered_only"]
+"""How strict a sidecar is about a request it can't place. `open` judges every request, without the task's facts where it holds none. `known_tasks` refuses a request that names a task it doesn't hold, and judges one that names no task. `registered_only` refuses any request that doesn't name a sample it holds, including one that names no task."""
+
+
 class UnregisteredSampleError(Exception):
-    """A request for a sample of a task registered beforehand that the registration doesn't hold."""
+    """A request the sidecar refuses because it can't place it: a sample of a task registered beforehand that the registration doesn't hold, or, by the sidecar's strictness, a task or sample it doesn't hold."""
+
+
+class UnknownTaskError(Exception):
+    """A sample's registration for a task the eval hasn't registered, or whose registration is no longer kept."""
 
 
 class SampleFacts(BaseModel):
@@ -46,8 +55,8 @@ class SampleFacts(BaseModel):
     )
 
 
-class TaskFacts(BaseModel):
-    """What a sentinel is told of a task and its samples, as `context.eval`."""
+class TaskInfo(BaseModel):
+    """What a sentinel is told of a task, apart from its samples."""
 
     task: str = Field(description="The task's name.")
     task_description: str | None = Field(
@@ -57,6 +66,11 @@ class TaskFacts(BaseModel):
         default_factory=dict[str, Any],
         description="The task's metadata. A sentinel is given it merged with each sample's own.",
     )
+
+
+class TaskFacts(TaskInfo):
+    """What a sentinel is told of a task and its samples, as `context.eval`."""
+
     samples: list[SampleFacts] = Field(description="Every sample of the task.")
 
     def eval_context(self, sample: InspectSample) -> EvalContext | None:
@@ -65,17 +79,48 @@ class TaskFacts(BaseModel):
             (fact for fact in self.samples if fact.sample_id == sample.sample_id),
             None,
         )
+        return _eval_context(self, found, sample) if found is not None else None
+
+
+class TaskRegistration(TaskInfo):
+    """What an eval registers of a task at task init: the task's facts, and which of its samples it runs. Each sample's own facts follow before the sample runs, in its `complete_registration`, so a large dataset is never sent at once."""
+
+    sample_ids: list[str | int] = Field(
+        description="The ids of the samples the eval runs, after `--limit`, `--sample-id` and the like."
+    )
+    epochs: int = Field(ge=1, description="How many epochs each sample runs.")
+
+
+@dataclass
+class RegisteredTask:
+    """A task an eval registered, with the facts of each sample whose registration is complete."""
+
+    registration: TaskRegistration
+    samples: dict[str | int, SampleFacts] = field(
+        default_factory=dict[str | int, SampleFacts]
+    )
+
+    def eval_context(self, sample: InspectSample) -> EvalContext | None:
+        """The sample a request names, as a sentinel is given it, or None if its registration isn't complete."""
+        found = self.samples.get(sample.sample_id)
         if found is None:
             return None
-        return EvalContext(
-            task=self.task,
-            task_description=self.task_description,
-            sample_id=found.sample_id,
-            epoch=sample.epoch,
-            sample_description=found.sample_description,
-            sample_input=found.sample_input,
-            metadata={**self.metadata, **found.metadata},
-        )
+        return _eval_context(self.registration, found, sample)
+
+
+def _eval_context(
+    task: TaskInfo, found: SampleFacts, sample: InspectSample
+) -> EvalContext:
+    # the epoch is the request's, as each epoch is a run of its own
+    return EvalContext(
+        task=task.task,
+        task_description=task.task_description,
+        sample_id=found.sample_id,
+        epoch=sample.epoch,
+        sample_description=found.sample_description,
+        sample_input=found.sample_input,
+        metadata={**task.metadata, **found.metadata},
+    )
 
 
 class FileTask(TaskFacts):

@@ -118,6 +118,12 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help="Take no tasks registered by an eval at task init. Where an eval can't be trusted, tasks are registered beforehand with --tasks-folder instead.",
     )
     parser.add_argument(
+        "--strictness",
+        choices=["open", "known_tasks", "registered_only"],
+        default="open",
+        help="How strict the sidecar is about a request it can't place. open, the default, judges every request, without the task's facts where it holds none. known_tasks refuses a request whose x-inspect-context names a task the sidecar doesn't hold, and judges one without the header. registered_only refuses any request that doesn't name a sample the sidecar holds, including one without the header, such as a grader's or a client's other than an eval's.",
+    )
+    parser.add_argument(
         "--task-expiry",
         type=float,
         default=MAX_TASK_EXPIRY,
@@ -176,6 +182,7 @@ class ServerSettings(BaseModel):
     time_limit: float | None = None
     eval_results: bool | None = None
     runtime_task_registration: bool | None = None
+    strictness: Literal["open", "known_tasks", "registered_only"] | None = None
     task_expiry: float | None = None
     max_task_registrations: int | None = None
     max_body_bytes: int | None = None
@@ -208,6 +215,7 @@ _OPTIONS: dict[str, tuple[str, str, Callable[[Any, Path], Any]]] = {
             "envoy_port",
             "reject_status",
             "time_limit",
+            "strictness",
             "task_expiry",
             "max_task_registrations",
             "max_body_bytes",
@@ -335,6 +343,7 @@ def handler_from_arguments(arguments: argparse.Namespace) -> Handler:
         if arguments.tasks_folder
         else None,
         runtime_task_registration=not arguments.no_runtime_task_registration,
+        strictness=arguments.strictness,
         task_expiry=arguments.task_expiry,
         max_task_registrations=arguments.max_task_registrations,
         release=arguments.release,

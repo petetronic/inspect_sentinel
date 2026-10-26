@@ -15,7 +15,7 @@ from .._context import EvalContext, ProxyContext
 from ._exchange import Refuse
 from ._host import ListRecorder, Record
 from ._inspect_client import Exchange, Withheld
-from ._registration import TaskFacts
+from ._registration import RegisteredTask
 from ._wire import Amendment, Edited, Format, Offered, Turn
 
 V = TypeVar("V")
@@ -238,14 +238,14 @@ class State(Protocol):
         ...
 
     async def register(
-        self, eval_id: str, task: str, facts: TaskFacts, expiry: float, limit: int
+        self, eval_id: str, task: str, facts: RegisteredTask, expiry: float, limit: int
     ) -> bool:
         """Keep a task an eval registered, in place of any it registered before.
 
         Args:
             eval_id: The eval's id.
             task: The task's name.
-            facts: The task and its samples.
+            facts: The task, the samples it runs, and those whose registration is complete.
             expiry: How long to keep it once no request has named it, in seconds.
             limit: How many registrations are kept at once.
 
@@ -254,7 +254,7 @@ class State(Protocol):
         """
         ...
 
-    async def registration(self, eval_id: str, task: str) -> TaskFacts | None:
+    async def registration(self, eval_id: str, task: str) -> RegisteredTask | None:
         """A task an eval registered, or None if none is kept. Asking counts as the task being named, so it is kept for its expiry from now."""
         ...
 
@@ -306,7 +306,7 @@ class MemoryState:
         )
         # each registration has an expiry of its own, and there are few, so
         # they are swept whole
-        self._tasks: dict[tuple[str, str], tuple[float, float, TaskFacts]] = {}
+        self._tasks: dict[tuple[str, str], tuple[float, float, RegisteredTask]] = {}
 
     async def run(self, key: str) -> Run:
         run = self._runs.get(key)
@@ -337,7 +337,7 @@ class MemoryState:
         return recorder.records if recorder is not None else None
 
     async def register(
-        self, eval_id: str, task: str, facts: TaskFacts, expiry: float, limit: int
+        self, eval_id: str, task: str, facts: RegisteredTask, expiry: float, limit: int
     ) -> bool:
         self._expire_tasks()
         if (eval_id, task) not in self._tasks and len(self._tasks) >= limit:
@@ -345,7 +345,7 @@ class MemoryState:
         self._tasks[(eval_id, task)] = (time.monotonic(), expiry, facts)
         return True
 
-    async def registration(self, eval_id: str, task: str) -> TaskFacts | None:
+    async def registration(self, eval_id: str, task: str) -> RegisteredTask | None:
         self._expire_tasks()
         kept = self._tasks.get((eval_id, task))
         if kept is None:
