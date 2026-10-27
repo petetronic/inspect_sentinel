@@ -41,6 +41,7 @@ class _Header(BaseModel):
     epoch: int
     sample_uuid: str
     attempt: str
+    attempt_number: int
 
 
 def inspect_sample(headers: Mapping[str, str]) -> InspectSample | None:

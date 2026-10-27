@@ -158,6 +158,7 @@ async def test_an_inspect_client_can_be_sent_only_what_it_acts_on() -> None:
         "epoch": 1,
         "sample_uuid": "sample_123",
         "attempt": "attempt_1",
+        "attempt_number": 1,
     }
     await handler.request(
         replace(request(), headers={"x-inspect-context": json.dumps(sample)})

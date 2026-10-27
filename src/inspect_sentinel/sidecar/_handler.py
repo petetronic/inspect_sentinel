@@ -232,7 +232,7 @@ class Handler:
 
         A request with `x-inspect-context` belongs to the sample it names, which is its run. A refusal then carries the `sentinel` field. A request whose header can't be read is refused, rather than judged as another client's would be: it says it is an eval's, and a proxy set to let through what can't be judged would let it through unjudged.
 
-        A conversation belongs to one attempt at the sample. A new attempt starts afresh, as Inspect starts the sample store afresh for it: its conversations, its count of rejected turns in a row, the sentinel's store, and the run's end if a sentinel ended the attempt before. A sample the eval has ended stays ended. Once a later attempt has begun, a request of an earlier one is refused unjudged, as nobody waits for it. A client that retries a request within the attempt keeps the attempt's conversation.
+        A conversation belongs to one attempt at the sample. A new attempt starts afresh, as Inspect starts the sample store afresh for it: its conversations, its count of rejected turns in a row, the sentinel's store, and the run's end if a sentinel ended the attempt before. A sample the eval has ended stays ended. Attempts are ordered by the number the header gives each. Once a later attempt has begun, a request of an earlier one is refused unjudged, as nobody waits for it, and so is one of another attempt with the same number. A client that retries a request within the attempt keeps the attempt's conversation.
 
         A request of a run that a sentinel has ended is refused, and the sentinel is not asked again. For a run no eval names, that is a request which continues the conversation the run was ended in.
 
@@ -572,20 +572,10 @@ class Handler:
         conversation_key = f"{key}/{sample_attempt}/{opening}" if named else key
         run_key = _run_key(named, key)
         run = await self._state.run(run_key)
-        if (
-            named
-            and run.attempt != sample_attempt
-            and sample_attempt not in run.replaced
-            and not run.closed
-        ):
-            # a new attempt at the sample: its model never saw the last
-            # attempt's turns, and in Inspect's own process its sample store
-            # starts empty
-            if run.attempt:
-                run.replaced.add(run.attempt)
-            run.attempt = sample_attempt
-            run.store = Store()
-            run.refusal = None
+        if sample is not None:
+            clash = _begin_attempt(run, sample)
+            if clash is not None:
+                return self._with_field(clash, proxy, Exchange(), "terminate", attempt)
         marks = request_marks(request.provider, request.body, request.format)
         refusal = _ended(run, marks, sample_attempt)
         if refusal is not None:
@@ -1218,6 +1208,27 @@ def _run_key(named: bool, key: str) -> str:
     # opening can work out, so the eval endpoint, which takes a sample's uuid,
     # must never reach one.
     return f"{'sample' if named else 'opening'}:{key}"
+
+
+def _begin_attempt(run: Run, sample: InspectSample) -> Refuse | None:
+    # A later attempt at the sample starts the run afresh: its model never saw
+    # the last attempt's turns, and in Inspect's own process its sample store
+    # starts empty. An earlier attempt's request is refused by `_ended`, and
+    # another attempt with the same number is refused here, as which of them
+    # is the sample's can't be told.
+    if run.closed:
+        return None
+    if sample.attempt_number > run.attempt_number:
+        run.attempt = sample.attempt
+        run.attempt_number = sample.attempt_number
+        run.store = Store()
+        run.refusal = None
+    elif sample.attempt_number == run.attempt_number and sample.attempt != run.attempt:
+        return Refuse(
+            400,
+            f"Another attempt at this sample has the number {sample.attempt_number}.",
+        )
+    return None
 
 
 def _ended(run: Run, marks: Sequence[str], attempt: str) -> Refuse | None:

@@ -155,11 +155,11 @@ class Run:
     attempt: str = ""
     """For a run an eval names, the attempt at the sample that the store and the run's end are of."""
 
+    attempt_number: int = 0
+    """That attempt's number. A request of an attempt with a lower one is refused unjudged, as nobody waits for it."""
+
     closed: bool = False
     """Whether the eval ended the sample, once it was scored. No later attempt starts the run again."""
-
-    replaced: set[str] = field(default_factory=set[str])
-    """For a run an eval names, the attempts a later attempt replaced. Their requests and replies are refused unjudged, as nobody waits for them."""
 
     conversations: dict[str, Conversation] = field(
         default_factory=dict[str, Conversation]

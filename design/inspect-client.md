@@ -193,12 +193,14 @@ This is an advanced setup, described in sidecar.md section 9:
   "sample_id": 1,
   "epoch": 2,
   "sample_uuid": "sample_123",
-  "attempt": "attempt_1"
+  "attempt": "attempt_1",
+  "attempt_number": 1
 }
 ```
 
 - `sample_uuid` stays the same when Inspect retries a failed sample.
 - `attempt` is new for each retry of the sample.
+- `attempt_number` is higher for each retry of the sample, so the sidecar can tell a late call of an earlier attempt from the current attempt's.
 
 The proxy removes both headers before the request reaches the provider.
 

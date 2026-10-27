@@ -116,6 +116,7 @@ SAMPLE: dict[str, Any] = {
     "epoch": 2,
     "sample_uuid": "sample_123",
     "attempt": "attempt_1",
+    "attempt_number": 1,
 }
 
 

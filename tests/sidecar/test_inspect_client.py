@@ -514,6 +514,7 @@ async def test_a_client_that_didnt_put_a_withheld_turn_back_is_told_of_it() -> N
         json.dumps(SAMPLE | {"version": 2}),
         json.dumps({k: v for k, v in SAMPLE.items() if k != "sample_uuid"}),
         json.dumps(SAMPLE | {"epoch": "2"}),
+        json.dumps({k: v for k, v in SAMPLE.items() if k != "attempt_number"}),
     ],
 )
 async def test_a_header_that_cant_be_read_is_refused(value: str) -> None:
@@ -536,7 +537,9 @@ async def test_a_new_attempt_is_not_told_of_a_turn_rejected_in_the_last() -> Non
     # a retry of the request within the attempt is told of it
     retried = await handler.request(_from_inspect(request("b")))
     # Inspect's retry of the sample opens as the attempt it replaces did
-    afresh = await handler.request(_from_inspect(request("c"), attempt="attempt_2"))
+    afresh = await handler.request(
+        _from_inspect(request("c"), attempt="attempt_2", attempt_number=2)
+    )
 
     assert isinstance(retried, Replace)
     assert afresh == Pass()
@@ -546,17 +549,21 @@ async def test_a_new_attempt_is_not_told_of_a_turn_rejected_in_the_last() -> Non
 async def test_a_new_attempt_counts_its_rejected_turns_in_a_row_afresh() -> None:
     handler = Handler(weather_rule("reject", "Tokyo"))
 
-    async def rejected(id: str, attempt: str) -> Refuse:
-        await handler.request(_from_inspect(request(id), attempt=attempt))
+    async def rejected(id: str, attempt: int) -> Refuse:
+        await handler.request(
+            _from_inspect(
+                request(id), attempt=f"attempt_{attempt}", attempt_number=attempt
+            )
+        )
         answer = await handler.reply(
             reply(message(weather("Tokyo", f"toolu_{id}")), id=id)
         )
         assert isinstance(answer, Refuse)
         return answer
 
-    await rejected("a", "attempt_1")
-    await rejected("b", "attempt_1")
-    third = await rejected("c", "attempt_2")
+    await rejected("a", 1)
+    await rejected("b", 1)
+    third = await rejected("c", 2)
 
     # the third rejected turn of the sample, but the first of its attempt
     assert third.message == (
@@ -591,14 +598,22 @@ async def test_a_new_attempt_starts_the_runs_store_and_its_end_afresh() -> None:
     await handler.reply(reply(message(weather("Oslo", "toolu_1")), id="a"))
 
     # each attempt has a store of its own, as the sample store is
-    await handler.request(_from_inspect(request("b"), attempt="attempt_2"))
+    await handler.request(
+        _from_inspect(request("b"), attempt="attempt_2", attempt_number=2)
+    )
     counted = await handler.reply(reply(message(weather("Oslo", "toolu_2")), id="b"))
     # and a run a sentinel ended is ended for that attempt only
     await handler.request(
-        _from_inspect(request("c", then=ran("Oslo", "A storm.")), attempt="attempt_2")
+        _from_inspect(
+            request("c", then=ran("Oslo", "A storm.")),
+            attempt="attempt_2",
+            attempt_number=2,
+        )
     )
     ended = await handler.sample_result("sample_123")
-    afresh = await handler.request(_from_inspect(request("d"), attempt="attempt_3"))
+    afresh = await handler.request(
+        _from_inspect(request("d"), attempt="attempt_3", attempt_number=3)
+    )
     latest = await handler.sample_result("sample_123")
 
     assert isinstance(counted, Refuse)
@@ -613,7 +628,9 @@ async def test_a_new_attempt_starts_the_runs_store_and_its_end_afresh() -> None:
 async def test_a_replaced_attempts_requests_and_replies_are_refused_unjudged() -> None:
     handler = Handler(counts_lookups_and_ends_at_storms())
     await handler.request(_from_inspect(request("a")))
-    await handler.request(_from_inspect(request("b"), attempt="attempt_2"))
+    await handler.request(
+        _from_inspect(request("b"), attempt="attempt_2", attempt_number=2)
+    )
 
     # the first attempt's reply arrives after its retry began
     late = await handler.reply(reply(message(weather("Oslo", "toolu_1")), id="a"))
@@ -670,7 +687,9 @@ async def test_a_judgment_that_outlives_its_attempt_leaves_the_next_alone() -> N
     async with anyio.create_task_group() as group:
         group.start_soon(judged_slowly)
         await _GATE["started"].wait()
-        await handler.request(_from_inspect(request("b"), attempt="attempt_2"))
+        await handler.request(
+            _from_inspect(request("b"), attempt="attempt_2", attempt_number=2)
+        )
         _GATE["release"].set()
     counted = await handler.reply(reply(message(weather("Lima", "toolu_2")), id="b"))
     result = await handler.sample_result("sample_123")
@@ -721,7 +740,9 @@ async def test_a_request_held_up_while_a_retry_begins_keeps_its_attempts_store()
     async with anyio.create_task_group() as group:
         group.start_soon(handler.request, _from_inspect(request("a")))
         await _GATE["started"].wait()
-        await handler.request(_from_inspect(request("b"), attempt="attempt_2"))
+        await handler.request(
+            _from_inspect(request("b"), attempt="attempt_2", attempt_number=2)
+        )
         _GATE["release"].set()
     result = await handler.sample_result("sample_123")
 
@@ -731,12 +752,49 @@ async def test_a_request_held_up_while_a_retry_begins_keeps_its_attempts_store()
 
 
 @pytest.mark.anyio
+async def test_an_earlier_attempt_first_seen_after_a_later_one_is_refused() -> None:
+    handler = Handler(counts_lookups_and_ends_at_storms())
+    await handler.request(
+        _from_inspect(request("b"), attempt="attempt_2", attempt_number=2)
+    )
+
+    # the first attempt's only request reaches the sidecar after its retry's
+    late = await handler.request(_from_inspect(request("a")))
+    counted = await handler.reply(reply(message(weather("Lima", "toolu_2")), id="b"))
+
+    assert isinstance(late, Refuse)
+    assert late.message == "A later attempt at this sample replaced this one."
+    # the retry goes on, its store its own
+    assert isinstance(counted, Refuse)
+    assert counted.message == "A sentinel rejected the call to get_weather: Lookup 1."
+
+
+@pytest.mark.anyio
+async def test_two_attempts_with_the_same_number_are_told_apart_by_refusal() -> None:
+    handler = Handler(counts_lookups_and_ends_at_storms())
+    await handler.request(_from_inspect(request("a")))
+
+    other = await handler.request(
+        _from_inspect(request("b"), attempt="attempt_other", attempt_number=1)
+    )
+    counted = await handler.reply(reply(message(weather("Lima", "toolu_1")), id="a"))
+
+    assert isinstance(other, Refuse)
+    assert other.message == "Another attempt at this sample has the number 1."
+    # the attempt first seen with the number goes on
+    assert isinstance(counted, Refuse)
+    assert counted.message == "A sentinel rejected the call to get_weather: Lookup 1."
+
+
+@pytest.mark.anyio
 async def test_a_sample_the_eval_ended_stays_ended_for_a_new_attempt() -> None:
     handler = Handler(counts_lookups_and_ends_at_storms())
     await handler.request(_from_inspect(request("a")))
     await handler.end_sample("sample_123")
 
-    answer = await handler.request(_from_inspect(request("b"), attempt="attempt_2"))
+    answer = await handler.request(
+        _from_inspect(request("b"), attempt="attempt_2", attempt_number=2)
+    )
 
     assert isinstance(answer, Refuse)
     assert answer.message == "This run has ended."
@@ -776,6 +834,7 @@ async def test_sentinel_is_given_what_the_proxy_and_the_header_say() -> None:
             epoch=2,
             sample_uuid="sample_123",
             attempt="attempt_1",
+            attempt_number=1,
         ),
     )
     # given to a monitor or protocol at any depth

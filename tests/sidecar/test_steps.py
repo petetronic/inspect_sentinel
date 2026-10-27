@@ -392,8 +392,8 @@ async def test_a_new_attempt_at_a_sample_starts_its_history_afresh() -> None:
     # the model of a new attempt never saw the discarded attempt's turns
     handler = Handler(reports_histories())
 
-    async def turn(id: str, attempt: str, **then: Any) -> list[str]:
-        headers = inspect_headers(attempt=attempt)
+    async def turn(id: str, attempt: int, **then: Any) -> list[str]:
+        headers = inspect_headers(attempt=f"attempt_{attempt}", attempt_number=attempt)
         await handler.request(replace(request(id, **then), headers=headers))
         await handler.reply(reply(message({"type": "text", "text": "Rain."}), id=id))
         return [
@@ -401,9 +401,9 @@ async def test_a_new_attempt_at_a_sample_starts_its_history_afresh() -> None:
             for explanation in _explanations(await handler.records(id))
         ]
 
-    await turn("a", "attempt_1")
-    later = await turn("b", "attempt_1", then=ran("Oslo", "rain", "toolu_1"))
-    fresh = await turn("c", "attempt_2")
+    await turn("a", 1)
+    later = await turn("b", 1, then=ran("Oslo", "rain", "toolu_1"))
+    fresh = await turn("c", 2)
 
     opening = ["You are helpful.", "What is the weather?"]
     assert later[0] == str(opening)
