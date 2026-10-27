@@ -154,10 +154,10 @@ class SampleResultResult(BaseModel):
 
     sample_uuid: str
     outcome: Literal["proceed", "terminate"] = Field(
-        description="`terminate` if a sentinel ended the sample."
+        description="`terminate` if a sentinel ended the sample's latest attempt."
     )
     store: dict[str, Any] = Field(
-        description="The sentinel's store, by the keys the sentinel wrote, to copy into the sample's store."
+        description="The sentinel's store of the sample's latest attempt, by the keys the sentinel wrote, to copy into the sample's store. Each attempt starts with an empty store, as the sample store does."
     )
 
 

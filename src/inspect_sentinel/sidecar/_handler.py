@@ -14,6 +14,7 @@ from inspect_ai.model import (
     ModelOutput,
 )
 from inspect_ai.tool import ToolCall, ToolCallView
+from inspect_ai.util import Store
 from pydantic import JsonValue
 
 from .._context import EvalContext, InspectSample, ProxyContext
@@ -229,7 +230,7 @@ class Handler:
 
         A request with `x-inspect-context` belongs to the sample it names, which is its run. A refusal then carries the `sentinel` field. A request whose header can't be read is refused, rather than judged as another client's would be: it says it is an eval's, and a proxy set to let through what can't be judged would let it through unjudged.
 
-        A conversation belongs to one attempt at the sample. A new attempt starts its conversations, and its count of rejected turns in a row, afresh, while the run's store, and the run's end if a sentinel ended it, carry over. A client that retries a request within the attempt keeps the attempt's conversation.
+        A conversation belongs to one attempt at the sample. A new attempt starts afresh, as Inspect starts the sample store afresh for it: its conversations, its count of rejected turns in a row, the sentinel's store, and the run's end if a sentinel ended the attempt before. A sample the eval has ended stays ended. A client that retries a request within the attempt keeps the attempt's conversation.
 
         A request of a run that a sentinel has ended is refused, and the sentinel is not asked again. For a run no eval names, that is a request which continues the conversation the run was ended in.
 
@@ -377,7 +378,7 @@ class Handler:
         return RequestResult(attempts[-1], records)
 
     async def sample_result(self, sample_uuid: str) -> SampleResult | None:
-        """What an eval's sample came to, and the sentinel's store, for the eval to copy into the sample's store before scoring. The handler keeps one run for each sample in each epoch, across the sample's retries.
+        """What an eval's sample came to, and the sentinel's store, for the eval to copy into the sample's store before scoring. The handler keeps one run for each sample in each epoch, and its store and end are those of the sample's latest attempt.
 
         Args:
             sample_uuid: The sample's uuid, as the eval names it.
@@ -569,6 +570,13 @@ class Handler:
         conversation_key = f"{key}/{sample_attempt}/{opening}" if named else key
         run_key = _run_key(named, key)
         run = await self._state.run(run_key)
+        if named and run.attempt != sample_attempt and not run.closed:
+            # a new attempt at the sample: its model never saw the last
+            # attempt's turns, and in Inspect's own process its sample store
+            # starts empty
+            run.attempt = sample_attempt
+            run.store = Store()
+            run.refusal = None
         marks = request_marks(request.provider, request.body, request.format)
         refusal = _ended(run, marks)
         if refusal is not None:

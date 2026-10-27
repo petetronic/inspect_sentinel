@@ -150,7 +150,13 @@ class Run:
     """What the sidecar keeps for one run."""
 
     store: Store = field(default_factory=Store)
-    """The sentinel's store."""
+    """The sentinel's store. For a run an eval names, it is the latest attempt's: a new attempt at the sample starts it afresh, as Inspect starts the sample store afresh."""
+
+    attempt: str = ""
+    """For a run an eval names, the attempt at the sample that the store and the run's end are of."""
+
+    closed: bool = False
+    """Whether the eval ended the sample, once it was scored. No later attempt starts the run again."""
 
     conversations: dict[str, Conversation] = field(
         default_factory=dict[str, Conversation]
@@ -161,7 +167,7 @@ class Run:
     """Rejected turns since a reply last passed, by the attempt an eval names, or `""`. A new attempt at a sample starts its own count, as its model never saw the earlier attempt's turns."""
 
     refusal: Refuse | None = None
-    """What every later request is refused with, once a sentinel has ended a run an eval names."""
+    """What every later request is refused with, once a sentinel has ended a run an eval names, or the eval has ended its sample. A sentinel's end is the attempt's, as the store is."""
 
     answered: set[str] = field(default_factory=set[str])
     """For a run no eval names: the marks of the requests whose replies were passed on."""
@@ -365,11 +371,12 @@ class MemoryState:
         if run is None:
             # a run never seen is left as it is, rather than refused from then on
             return self._ended.get(key) is not None
+        run.closed = True
         if run.refusal is None:
             # held by any request or reply of the run still being judged
             run.refusal = Refuse(400, "This run has ended.")
         if self._ended.get(key) is None:
-            self._ended.put(key, Run(refusal=run.refusal))
+            self._ended.put(key, Run(refusal=run.refusal, closed=True))
         return True
 
     async def attempt(self, request: str, exchange: str) -> Attempt:

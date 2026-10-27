@@ -27,7 +27,7 @@ from inspect_sentinel.sidecar import (
     UnreadableError,
     read_reply,
 )
-from inspect_sentinel.sidecar._handler import _ENDED
+from inspect_sentinel.sidecar._handler import _ENDED, SampleResult
 from inspect_sentinel.sidecar._inspect_client import with_sentinel
 from inspect_sentinel.sidecar._wire import stream_events
 from tests.sidecar._traffic import (
@@ -582,26 +582,40 @@ def counts_lookups_and_ends_at_storms() -> Protocol:
 
 
 @pytest.mark.anyio
-async def test_a_new_attempt_keeps_the_runs_store_and_its_end() -> None:
+async def test_a_new_attempt_starts_the_runs_store_and_its_end_afresh() -> None:
     handler = Handler(counts_lookups_and_ends_at_storms())
     await handler.request(_from_inspect(request("a")))
     await handler.reply(reply(message(weather("Oslo", "toolu_1")), id="a"))
 
-    # the store is the sample's, across its attempts
+    # each attempt has a store of its own, as the sample store is
     await handler.request(_from_inspect(request("b"), attempt="attempt_2"))
     counted = await handler.reply(reply(message(weather("Oslo", "toolu_2")), id="b"))
-    # and a run a sentinel ended stays ended for a later attempt
+    # and a run a sentinel ended is ended for that attempt only
     await handler.request(
         _from_inspect(request("c", then=ran("Oslo", "A storm.")), attempt="attempt_2")
     )
-    ended = await handler.request(_from_inspect(request("d"), attempt="attempt_3"))
+    ended = await handler.sample_result("sample_123")
+    afresh = await handler.request(_from_inspect(request("d"), attempt="attempt_3"))
+    latest = await handler.sample_result("sample_123")
 
     assert isinstance(counted, Refuse)
-    assert counted.message == "A sentinel rejected the call to get_weather: Lookup 2."
-    assert isinstance(ended, Refuse)
-    assert ended.message == (
-        "A sentinel ended this run at the result of the call to get_weather."
-    )
+    assert counted.message == "A sentinel rejected the call to get_weather: Lookup 1."
+    assert ended is not None
+    assert ended.outcome == "terminate"
+    assert afresh == Pass()
+    assert latest == SampleResult("proceed", {})
+
+
+@pytest.mark.anyio
+async def test_a_sample_the_eval_ended_stays_ended_for_a_new_attempt() -> None:
+    handler = Handler(counts_lookups_and_ends_at_storms())
+    await handler.request(_from_inspect(request("a")))
+    await handler.end_sample("sample_123")
+
+    answer = await handler.request(_from_inspect(request("b"), attempt="attempt_2"))
+
+    assert isinstance(answer, Refuse)
+    assert answer.message == "This run has ended."
 
 
 @protocol

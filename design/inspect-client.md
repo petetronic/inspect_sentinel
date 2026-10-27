@@ -288,7 +288,7 @@ Some ways the field goes missing:
 2. Inspect scores the sample.
 3. After the final scoring, `end_sample`: the sidecar drops the run's monitor state, and the rest of what it keeps for the sample.
 
-Inspect skips `end_sample` when it will retry the sample, so that the retry keeps its monitor state in the sidecar.
+Inspect skips `end_sample` when it will retry the sample, since a sample the eval has ended is refused from then on. The retry starts with empty monitor state in the sidecar, as it starts with an empty sample store in Inspect's own process.
 
 **Waiting on:** Meridian's answer to I, on whether this copy is wanted at all. A failed copy must never look like a sample in which the sentinel had nothing to say.
 
