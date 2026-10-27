@@ -29,7 +29,9 @@ from inspect_sentinel.sidecar import (
     read_reply,
 )
 from inspect_sentinel.sidecar._handler import _ENDED, SampleResult
+from inspect_sentinel.sidecar._host import ListRecorder
 from inspect_sentinel.sidecar._inspect_client import with_sentinel
+from inspect_sentinel.sidecar._state import MemoryState
 from inspect_sentinel.sidecar._wire import stream_events
 from tests.sidecar._traffic import (
     JSON,
@@ -679,6 +681,53 @@ async def test_a_judgment_that_outlives_its_attempt_leaves_the_next_alone() -> N
     assert counted.message == "A sentinel rejected the call to get_weather: Lookup 1."
     assert result is not None
     assert result.outcome == "proceed"
+
+
+class _SlowRecorders(MemoryState):
+    """State whose second lookup of the first request's recorder waits, as a shared backend's may: the request has begun its attempt, and not yet been held."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._looked_up = 0
+
+    async def recorder(self, id: str) -> ListRecorder:
+        if id == "a":
+            self._looked_up += 1
+            if self._looked_up == 2:
+                _GATE["started"].set()
+                await _GATE["release"].wait()
+        return await super().recorder(id)
+
+
+@protocol
+def counts_requests() -> Protocol:
+    async def decide(
+        context: Context, step: BeforeGenerate, escalations: Escalations
+    ) -> Decision | None:
+        context.store_as(_Lookups).count += 1
+        return None
+
+    return decide
+
+
+@pytest.mark.anyio
+async def test_a_request_held_up_while_a_retry_begins_keeps_its_attempts_store() -> (
+    None
+):
+    _GATE.update(started=anyio.Event(), release=anyio.Event())
+    handler = Handler(counts_requests(), state=_SlowRecorders())
+
+    # the retry begins while the first attempt's request waits on the state
+    async with anyio.create_task_group() as group:
+        group.start_soon(handler.request, _from_inspect(request("a")))
+        await _GATE["started"].wait()
+        await handler.request(_from_inspect(request("b"), attempt="attempt_2"))
+        _GATE["release"].set()
+    result = await handler.sample_result("sample_123")
+
+    # only the retry's own request is counted in its store
+    assert result is not None
+    assert result.store["_Lookups::count"] == 1
 
 
 @pytest.mark.anyio

@@ -591,6 +591,9 @@ class Handler:
         if refusal is not None:
             # the run has ended, and the sentinel is not asked again
             return self._with_field(refusal, proxy, Exchange(), "terminate", attempt)
+        # the attempt's store, taken before anything below awaits, since a
+        # retry may replace the run's store meanwhile
+        store = run.store
         if sample is not None:
             found = await self._eval(sample)
             if run.eval is None:
@@ -673,7 +676,7 @@ class Handler:
             offered=sends,
             marks=marks,
             proxy=proxy,
-            store=run.store,
+            store=store,
             attempt=attempt,
         )
         said = call_texts(request.provider, request.body, request.format)
