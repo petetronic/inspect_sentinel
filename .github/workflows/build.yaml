@@ -47,8 +47,10 @@ jobs:
           # below. One command, so scout's inspect-ai requirement resolves to
           # the git inspect_ai rather than a release.
           if [ "$HEAD_REF" != "release-please--branches--main" ]; then
+            # temporary: the inspect_ai client this branch needs, until it
+            # lands; back to inspect_ai's main before this branch merges
             uv pip install \
-              git+https://github.com/UKGovernmentBEIS/inspect_ai.git \
+              git+https://github.com/petetronic/inspect_ai.git@feat/sentinel-sidecar-client \
               git+https://github.com/meridianlabs-ai/inspect_scout.git
           fi
           uv pip install -e ".[dev]"
@@ -80,8 +82,10 @@ jobs:
           # below. One command, so scout's inspect-ai requirement resolves to
           # the git inspect_ai rather than a release.
           if [ "$HEAD_REF" != "release-please--branches--main" ]; then
+            # temporary: the inspect_ai client this branch needs, until it
+            # lands; back to inspect_ai's main before this branch merges
             uv pip install \
-              git+https://github.com/UKGovernmentBEIS/inspect_ai.git \
+              git+https://github.com/petetronic/inspect_ai.git@feat/sentinel-sidecar-client \
               git+https://github.com/meridianlabs-ai/inspect_scout.git
           fi
           uv pip install -e ".[dev]"
@@ -118,8 +122,10 @@ jobs:
           # below. One command, so scout's inspect-ai requirement resolves to
           # the git inspect_ai rather than a release.
           if [ "$HEAD_REF" != "release-please--branches--main" ]; then
+            # temporary: the inspect_ai client this branch needs, until it
+            # lands; back to inspect_ai's main before this branch merges
             uv pip install \
-              git+https://github.com/UKGovernmentBEIS/inspect_ai.git \
+              git+https://github.com/petetronic/inspect_ai.git@feat/sentinel-sidecar-client \
               git+https://github.com/meridianlabs-ai/inspect_scout.git
           fi
           uv pip install -e ".[dev]"
@@ -155,8 +161,10 @@ jobs:
           # in below. One command, so scout's inspect-ai requirement resolves to
           # the git inspect_ai rather than a release.
           if [ "$HEAD_REF" != "release-please--branches--main" ]; then
+            # temporary: the inspect_ai client this branch needs, until it
+            # lands; back to inspect_ai's main before this branch merges
             uv pip install \
-              git+https://github.com/UKGovernmentBEIS/inspect_ai.git \
+              git+https://github.com/petetronic/inspect_ai.git@feat/sentinel-sidecar-client \
               git+https://github.com/meridianlabs-ai/inspect_scout.git
           fi
           uv pip install dist/*.whl
