@@ -158,6 +158,9 @@ class Run:
     closed: bool = False
     """Whether the eval ended the sample, once it was scored. No later attempt starts the run again."""
 
+    replaced: set[str] = field(default_factory=set[str])
+    """For a run an eval names, the attempts a later attempt replaced. Their requests and replies are refused unjudged, as nobody waits for them."""
+
     conversations: dict[str, Conversation] = field(
         default_factory=dict[str, Conversation]
     )
@@ -204,6 +207,8 @@ class Held:
     """The request's marks, for each count of the entries the client sent, before anything was added."""
     proxy: ProxyContext
     """What the proxy said about the request."""
+    store: Store
+    """The sentinel's store as the request found it, its attempt's, so that a judgment that outlives its attempt writes nowhere a later attempt reads."""
     attempt: Attempt | None = None
     """The attempt at the request, for an eval that names its requests."""
     exchange: Exchange = field(default_factory=Exchange)

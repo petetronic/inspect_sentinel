@@ -2,6 +2,7 @@ import json
 from dataclasses import replace
 from typing import Any
 
+import anyio
 import pytest
 from inspect_ai.util import StoreModel
 
@@ -604,6 +605,80 @@ async def test_a_new_attempt_starts_the_runs_store_and_its_end_afresh() -> None:
     assert ended.outcome == "terminate"
     assert afresh == Pass()
     assert latest == SampleResult("proceed", {})
+
+
+@pytest.mark.anyio
+async def test_a_replaced_attempts_requests_and_replies_are_refused_unjudged() -> None:
+    handler = Handler(counts_lookups_and_ends_at_storms())
+    await handler.request(_from_inspect(request("a")))
+    await handler.request(_from_inspect(request("b"), attempt="attempt_2"))
+
+    # the first attempt's reply arrives after its retry began
+    late = await handler.reply(reply(message(weather("Oslo", "toolu_1")), id="a"))
+    # and a request of the first attempt doesn't start it again
+    again = await handler.request(_from_inspect(request("c")))
+    counted = await handler.reply(reply(message(weather("Lima", "toolu_2")), id="b"))
+
+    replaced = "A later attempt at this sample replaced this one."
+    assert isinstance(late, Refuse)
+    assert late.message == replaced
+    assert isinstance(again, Refuse)
+    assert again.message == replaced
+    # the late reply was never judged, so it counted nothing
+    assert isinstance(counted, Refuse)
+    assert counted.message == "A sentinel rejected the call to get_weather: Lookup 1."
+
+
+# set by the test that waits in a judgment
+_GATE: dict[str, anyio.Event] = {}
+
+
+@protocol
+def waits_at_oslo_and_ends_at_paris() -> Protocol:
+    async def decide(
+        context: Context, step: BeforeToolCall, escalations: Escalations
+    ) -> Decision | None:
+        location = step.call.arguments.get("location")
+        if location == "Oslo":
+            _GATE["started"].set()
+            await _GATE["release"].wait()
+            return None
+        lookups = context.store_as(_Lookups)
+        lookups.count += 1
+        if location == "Paris":
+            return Decision.terminate("a storm in Paris")
+        return Decision.reject("counted", message=f"Lookup {lookups.count}.")
+
+    return decide
+
+
+@pytest.mark.anyio
+async def test_a_judgment_that_outlives_its_attempt_leaves_the_next_alone() -> None:
+    _GATE.update(started=anyio.Event(), release=anyio.Event())
+    handler = Handler(waits_at_oslo_and_ends_at_paris())
+    await handler.request(_from_inspect(request("a")))
+    answers: dict[str, object] = {}
+
+    async def judged_slowly() -> None:
+        # Paris is judged once the next attempt has begun
+        turn = message(weather("Oslo", "toolu_1"), weather("Paris", "toolu_3"))
+        answers["a"] = await handler.reply(reply(turn, id="a"))
+
+    # the retry begins while the first attempt's reply is still being judged
+    async with anyio.create_task_group() as group:
+        group.start_soon(judged_slowly)
+        await _GATE["started"].wait()
+        await handler.request(_from_inspect(request("b"), attempt="attempt_2"))
+        _GATE["release"].set()
+    counted = await handler.reply(reply(message(weather("Lima", "toolu_2")), id="b"))
+    result = await handler.sample_result("sample_123")
+
+    # its count and its end stay with the attempt it was part of
+    assert isinstance(answers["a"], Refuse)
+    assert isinstance(counted, Refuse)
+    assert counted.message == "A sentinel rejected the call to get_weather: Lookup 1."
+    assert result is not None
+    assert result.outcome == "proceed"
 
 
 @pytest.mark.anyio

@@ -102,6 +102,8 @@ from ._wire import (
 # it: a model that keeps proposing rejected calls would otherwise never stop
 _MAX_CONSECUTIVE_REJECTIONS = 3
 
+_REPLACED = Refuse(400, "A later attempt at this sample replaced this one.")
+
 # what inspect_ai tells the model of a rejected call that has no message
 _REJECTED = "Tool call not approved."
 _NOT_RUN = "This call was not run, because another call in the same turn was rejected."
@@ -230,7 +232,7 @@ class Handler:
 
         A request with `x-inspect-context` belongs to the sample it names, which is its run. A refusal then carries the `sentinel` field. A request whose header can't be read is refused, rather than judged as another client's would be: it says it is an eval's, and a proxy set to let through what can't be judged would let it through unjudged.
 
-        A conversation belongs to one attempt at the sample. A new attempt starts afresh, as Inspect starts the sample store afresh for it: its conversations, its count of rejected turns in a row, the sentinel's store, and the run's end if a sentinel ended the attempt before. A sample the eval has ended stays ended. A client that retries a request within the attempt keeps the attempt's conversation.
+        A conversation belongs to one attempt at the sample. A new attempt starts afresh, as Inspect starts the sample store afresh for it: its conversations, its count of rejected turns in a row, the sentinel's store, and the run's end if a sentinel ended the attempt before. A sample the eval has ended stays ended. Once a later attempt has begun, a request of an earlier one is refused unjudged, as nobody waits for it. A client that retries a request within the attempt keeps the attempt's conversation.
 
         A request of a run that a sentinel has ended is refused, and the sentinel is not asked again. For a run no eval names, that is a request which continues the conversation the run was ended in.
 
@@ -570,15 +572,22 @@ class Handler:
         conversation_key = f"{key}/{sample_attempt}/{opening}" if named else key
         run_key = _run_key(named, key)
         run = await self._state.run(run_key)
-        if named and run.attempt != sample_attempt and not run.closed:
+        if (
+            named
+            and run.attempt != sample_attempt
+            and sample_attempt not in run.replaced
+            and not run.closed
+        ):
             # a new attempt at the sample: its model never saw the last
             # attempt's turns, and in Inspect's own process its sample store
             # starts empty
+            if run.attempt:
+                run.replaced.add(run.attempt)
             run.attempt = sample_attempt
             run.store = Store()
             run.refusal = None
         marks = request_marks(request.provider, request.body, request.format)
-        refusal = _ended(run, marks)
+        refusal = _ended(run, marks, sample_attempt)
         if refusal is not None:
             # the run has ended, and the sentinel is not asked again
             return self._with_field(refusal, proxy, Exchange(), "terminate", attempt)
@@ -664,6 +673,7 @@ class Handler:
             offered=sends,
             marks=marks,
             proxy=proxy,
+            store=run.store,
             attempt=attempt,
         )
         said = call_texts(request.provider, request.body, request.format)
@@ -699,7 +709,7 @@ class Handler:
                     attempt,
                 )
         # another exchange of the run may have ended it while this one waited
-        refusal = _ended(run, marks)
+        refusal = _ended(run, marks, sample_attempt)
         if refusal is not None:
             return self._with_field(refusal, proxy, held.exchange, "terminate", attempt)
         # the request goes on to the model, as the client sent it with what
@@ -770,7 +780,7 @@ class Handler:
                 while (judging := self._judging.get(key)) is not None:
                     await judging.wait()
                 # the judgment waited for may have ended the run
-                refusal = _ended(run, held.marks)
+                refusal = _ended(run, held.marks, held.sample_attempt)
                 if refusal is not None:
                     return refusal
             # a rejection the client put back itself is the sidecar's own
@@ -864,7 +874,7 @@ class Handler:
         )
         # kept whatever is decided: the provider continues from what it sent
         conversation.noted = noted
-        refusal = _ended(run, held.marks)
+        refusal = _ended(run, held.marks, held.sample_attempt)
         if refusal is not None:
             # a sentinel ended the run while the model was answering
             held.exchange.ended = True
@@ -1114,7 +1124,7 @@ class Handler:
             HostContext(
                 host=RunHost(self._host, run.eval),
                 recorder=held.recorder,
-                store=run.store,
+                store=held.store,
                 proxy=held.proxy,
             ),
             step,
@@ -1150,7 +1160,7 @@ class Handler:
 
     def _ended_meanwhile(self, held: Held, run: Run) -> Refuse | None:
         # another exchange of the run may have ended it while this one waited
-        refusal = _ended(run, held.marks)
+        refusal = _ended(run, held.marks, held.sample_attempt)
         if refusal is not None:
             held.exchange.ended = True
         return refusal
@@ -1158,8 +1168,12 @@ class Handler:
     def _end(self, held: Held, run: Run, where: str) -> Refuse:
         held.exchange.ended = True
         refusal = Refuse(400, f"A sentinel ended this run {where}.")
-        run.in_a_row.clear()
+        run.in_a_row.pop(held.sample_attempt, None)
         if held.named:
+            # a judgment that outlived its attempt ends only that attempt,
+            # which nobody waits for
+            if held.sample_attempt != run.attempt:
+                return refusal
             run.refusal = refusal
             # nothing of the run goes on, so nothing is put back again
             for conversation in run.conversations.values():
@@ -1203,10 +1217,12 @@ def _run_key(named: bool, key: str) -> str:
     return f"{'sample' if named else 'opening'}:{key}"
 
 
-def _ended(run: Run, marks: Sequence[str]) -> Refuse | None:
+def _ended(run: Run, marks: Sequence[str], attempt: str) -> Refuse | None:
     # what a request is refused with, if its run has ended: any request of a
     # run an eval names, or one that continues the conversation it was ended
-    # in
+    # in; and any request or reply of an attempt a later one replaced
+    if not run.closed and attempt != run.attempt:
+        return _REPLACED
     return run.refusal or next(
         (run.ended_at[mark] for mark in marks if mark in run.ended_at), None
     )
