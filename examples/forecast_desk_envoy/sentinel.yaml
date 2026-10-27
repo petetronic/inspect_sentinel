@@ -1,0 +1,16 @@
+# What the sidecar runs, and how it serves. Envoy's side is envoy.yaml.
+sentinel:
+  # the desk's protocol, with the monitor it consults: `desk_rules` is the
+  # package in rule/, which Dockerfile.sidecar installs, and inspect_ai finds
+  # by its entry point
+  name: desk_rules/forecast_desk
+  monitors:
+    - name: desk_rules/rain_watch
+server:
+  # inside the stack, where only Envoy reaches the sidecar
+  host: 0.0.0.0
+  # the endpoints for proxies and for evals; Envoy sends /sentinel/ here
+  port: 8900
+  envoy:
+    # the Envoy shim, which Envoy's ext_proc filter calls over gRPC
+    port: 8902

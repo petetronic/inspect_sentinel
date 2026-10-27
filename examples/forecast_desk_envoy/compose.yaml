@@ -1,0 +1,34 @@
+# The forecast_desk example behind Envoy: Envoy in front of the model
+# providers, and the sidecar deciding for it. See README.md.
+services:
+  envoy:
+    image: envoyproxy/envoy:v1.39.4@sha256:74bd4eb5629708d3fadca1a5e6b85d208f338d7bb54e06b69565905c5294cc01
+    depends_on:
+      sidecar:
+        condition: service_healthy
+    command:
+      - --config-path
+      - /config/envoy.yaml
+      - --log-level
+      - warning
+    volumes:
+      # written by `python -m inspect_sentinel.sidecar.envoy`
+      - ./envoy.yaml:/config/envoy.yaml:ro
+    ports:
+      - 127.0.0.1:8080:8080
+
+  sidecar:
+    build:
+      context: ../..
+      dockerfile: examples/forecast_desk_envoy/Dockerfile.sidecar
+    command:
+      - --sentinel
+      - /sentinel/sentinel.yaml
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8900/health')"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    volumes:
+      - ./sentinel.yaml:/sentinel/sentinel.yaml:ro
+    # no port is published: only Envoy reaches the sidecar, inside the stack

@@ -1,0 +1,16 @@
+# The example's rules, as a package the sidecar's image installs. inspect_ai
+# finds its monitors and protocols through the entry point, by the name
+# desk_rules/<name>.
+[project]
+name = "desk-rules"
+version = "0.1.0"
+description = "The forecast_desk_envoy example's rules: a monitor that counts rainy reports, and the desk's protocol."
+requires-python = ">=3.11"
+dependencies = ["inspect_sentinel"]
+
+[project.entry-points.inspect_ai]
+desk_rules = "desk_rules"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
