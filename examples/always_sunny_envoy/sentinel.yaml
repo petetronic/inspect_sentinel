@@ -11,5 +11,7 @@ server:
   envoy:
     # the Envoy shim, which Envoy's ext_proc filter calls over gRPC
     port: 8902
-  # a status Inspect retries by itself, so the model is told of a rejection
-  reject_status: 503
+  # the default: a rejected turn is refused with a final status, which an
+  # Inspect that reads the sidecar's decisions turns into the model's turn.
+  # For an Inspect that doesn't, use 503 (see README.md).
+  reject_status: 400

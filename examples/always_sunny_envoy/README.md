@@ -9,7 +9,7 @@ The task itself knows nothing about the sentinel. There is no `sentinel=` in `ta
 [`../always_sunny`](../always_sunny) is the same example behind LiteLLM.
 
 | File | What it is |
-|------|------------|
+| --- | --- |
 | `rule/` | the rule, `always_sunny`, in a small package, `weather_rules`, that the sidecar's image installs |
 | `sentinel.yaml` | the sidecar's file: the sentinel, which names that rule, and how the sidecar serves |
 | `envoy.yaml` | Envoy's configuration, written by `python -m inspect_sentinel.sidecar.envoy` |
@@ -42,9 +42,15 @@ To try a rule of your own, edit `rule/weather_rules/__init__.py` and `sentinel.y
 
 ## What to look for
 
-The sample passes, and Inspect reports one HTTP retry. That retry is the rejection.
+The sample passes. The model files a rainy report first, the sentinel rejects it, and the model files a sunny one.
 
-`reject_status: 503` in `sentinel.yaml` is what lets the run carry on. The sidecar refuses the rainy report with a status Inspect retries by itself, and adds the rejection to the retried request, so the model sees its own report and the editor's note. With the default, 400, the refusal is final and the sample fails with the sentinel's message.
+Inspect finds the sidecar through Envoy, at `/sentinel/`, because the task's base URL is set to Envoy. Inspect then reads the sidecar's decisions:
+
+- The sidecar refuses the rainy report with `reject_status: 400`, set in `sentinel.yaml`. Inspect turns that refusal into the model's turn, and the rejected call gets the sentinel's message as an approval error, as it would if the sentinel ran inside Inspect.
+- The log has a sentinel event for each decision, the rejection and then the sunny report going ahead. Each event names the sidecar that made it.
+- Inspect reports no HTTP retries.
+
+Inspect finds the sidecar only if it reads the sidecar's decisions. An Inspect that doesn't read them, or a run with `--sentinel-proxy off`, treats the 400 as final, and the sample fails with the sentinel's message. For such a run, set `reject_status: 503` in `sentinel.yaml` and rebuild the sidecar. The sidecar then refuses with a status Inspect retries by itself, and adds the rejection to the retried request, so the model sees its own report and the editor's note. Inspect reports one HTTP retry, and that retry is the rejection. The rejection isn't in Inspect's log, since Inspect never saw it.
 
 ## What an operator sets
 
@@ -59,7 +65,7 @@ python -m inspect_sentinel.sidecar.envoy --sidecar-host sidecar --sidecar-port 8
 Between each pair of parts:
 
 | From | To | How it is kept safe |
-|------|----|---------------------|
+| --- | --- | --- |
 | Envoy | the provider | TLS, with the provider's certificate checked against the system's trusted certificates |
 | the agent | Envoy | plain HTTP in this stack, where only your own machine reaches Envoy. Elsewhere, put Envoy where only the agents it serves can reach it, or add Envoy's own TLS and authentication |
 | Envoy | the sidecar | plain HTTP and gRPC inside the stack, where nothing but Envoy reaches the sidecar: no port of the sidecar's is published |
