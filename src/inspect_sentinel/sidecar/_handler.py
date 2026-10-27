@@ -104,6 +104,7 @@ _MAX_CONSECUTIVE_REJECTIONS = 3
 # what inspect_ai tells the model of a rejected call that has no message
 _REJECTED = "Tool call not approved."
 _NOT_RUN = "This call was not run, because another call in the same turn was rejected."
+_ENDED = "This call was not run, because a sentinel ended the run."
 
 
 REQUEST_ID = "x-irid"
@@ -876,6 +877,8 @@ class Handler:
                 output=output,
             )
             if _ends(await self._judge(held, run, after)):
+                if output.choices:
+                    _withhold_ended(held, output.message)
                 return self._end(held, run, "at the model's reply")
 
         if not output.choices:
@@ -905,6 +908,7 @@ class Handler:
             if decision is None or decision.action == "proceed":
                 continue
             if decision.action == "terminate":
+                _withhold_ended(held, message)
                 return self._end(held, run, f"at the call to {call.function}")
             # the client is never handed the call as the model proposed it
             held.exchange.judged[-1].original = call
@@ -1173,6 +1177,14 @@ class Handler:
         return TimeLimitError(
             f"The sentinel didn't finish judging the {what} {id!r} within {self._time_limit} seconds."
         )
+
+
+def _withhold_ended(held: Held, message: ChatMessageAssistant) -> None:
+    # the client records the turn the run ended at, as an in-process sentinel
+    # leaves it in the transcript; none of its calls runs
+    held.exchange.withheld = Withheld(
+        message, {call.id: _ENDED for call in message.tool_calls or []}
+    )
 
 
 def _run_key(named: bool, key: str) -> str:

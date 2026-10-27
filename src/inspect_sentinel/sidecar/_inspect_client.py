@@ -153,7 +153,7 @@ class SentinelField(BaseModel):
     )
     withheld: WithheldTurn | None = Field(
         default=None,
-        description="The model's turn, when the client was refused it because a call in it was rejected.",
+        description="The model's turn, when the client was refused it because a call in it was rejected, or because a sentinel ended the run at the reply or at a call in it.",
     )
     proposed: WithheldTurn | None = Field(
         default=None,

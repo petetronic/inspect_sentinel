@@ -9,7 +9,13 @@ from inspect_sentinel._context import Context, InspectSample, ProxyContext
 from inspect_sentinel._decorators import protocol
 from inspect_sentinel._protocols import concurrent
 from inspect_sentinel._report import Decision, Escalations
-from inspect_sentinel._step import AfterToolCall, BeforeGenerate, BeforeToolCall, Step
+from inspect_sentinel._step import (
+    AfterGenerate,
+    AfterToolCall,
+    BeforeGenerate,
+    BeforeToolCall,
+    Step,
+)
 from inspect_sentinel._types import Protocol, ProtocolGroup
 from inspect_sentinel.sidecar import (
     Handler,
@@ -21,6 +27,7 @@ from inspect_sentinel.sidecar import (
     UnreadableError,
     read_reply,
 )
+from inspect_sentinel.sidecar._handler import _ENDED
 from inspect_sentinel.sidecar._inspect_client import with_sentinel
 from inspect_sentinel.sidecar._wire import stream_events
 from tests.sidecar._traffic import (
@@ -273,7 +280,43 @@ async def test_a_run_ended_at_a_call_is_the_last_step() -> None:
     assert answer.sentinel["outcome"] == "terminate"
     assert _stages(dict(answer.sentinel))[-1] == ("tool_call", "terminate")
     assert "original" not in answer.sentinel["steps"][-1]
-    assert "withheld" not in answer.sentinel
+    # the turn the run ended at, which the client records; none of it ran
+    withheld = answer.sentinel["withheld"]
+    assert [call["id"] for call in withheld["message"]["tool_calls"]] == [
+        "toolu_1",
+        "toolu_2",
+        "toolu_3",
+    ]
+    assert set(withheld["results"].values()) == {_ENDED}
+
+
+@protocol
+def ends_at_the_reply() -> Protocol:
+    """End the run at the model's reply."""
+
+    async def decide(
+        context: Context, step: AfterGenerate, escalations: Escalations
+    ) -> Decision | None:
+        return Decision.terminate("the reply")
+
+    return decide
+
+
+@pytest.mark.anyio
+async def test_a_run_ended_at_the_reply_carries_the_turn() -> None:
+    handler = Handler(ends_at_the_reply())
+    asked, answered = _exchange("anthropic")
+    await handler.request(asked)
+
+    answer = await handler.reply(answered)
+
+    assert isinstance(answer, Refuse)
+    assert answer.sentinel is not None
+    assert answer.sentinel["outcome"] == "terminate"
+    assert _stages(dict(answer.sentinel)) == [("model_output", "terminate")]
+    withheld = answer.sentinel["withheld"]
+    assert len(withheld["message"]["tool_calls"]) == 3
+    assert set(withheld["results"].values()) == {_ENDED}
 
 
 @pytest.mark.anyio

@@ -129,7 +129,7 @@ class RequestResultResult(BaseModel):
     )
     withheld: WithheldTurn | None = Field(
         default=None,
-        description="The model's turn, when the latest attempt was refused it because a call in it was rejected, as the `sentinel` field holds it. An eval puts it into its own copy of the conversation, as it would from the field.",
+        description="The model's turn, when the latest attempt was refused it because a call in it was rejected, or because a sentinel ended the run at the reply or at a call in it, as the `sentinel` field holds it. An eval puts it into its own copy of the conversation, as it would from the field.",
     )
     proposed: WithheldTurn | None = Field(
         default=None,

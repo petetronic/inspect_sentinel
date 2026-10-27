@@ -1,5 +1,6 @@
 import json
 import re
+from dataclasses import replace
 
 import anyio
 import pytest
@@ -111,9 +112,20 @@ def _comparable(outputs: list[Output]) -> list[Output]:
             re.sub(rb'("proposed": \{"message": \{"id": )"[^"]*"', rb'\1"id"', o.data)
         )
         if isinstance(o, Release)
+        else _without_turn_id(o)
+        if isinstance(o, Refuse)
         else o
         for o in outputs
     ]
+
+
+def _without_turn_id(refused: Refuse) -> Refuse:
+    if refused.sentinel is None or "withheld" not in refused.sentinel:
+        return refused
+    withheld = refused.sentinel["withheld"]
+    message = {**withheld["message"], "id": "id"}
+    sentinel = {**refused.sentinel, "withheld": {**withheld, "message": message}}
+    return replace(refused, sentinel=sentinel)
 
 
 @pytest.mark.anyio

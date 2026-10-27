@@ -201,7 +201,7 @@ async def _sidecar(
             "Tokyo",
             "error_event",
             "terminate",
-            None,
+            _CALLS,
             ["proceed", "terminate"],
         ),
     ],

@@ -58,7 +58,7 @@ class Attempt:
     """What the model is told, for a rejection."""
 
     withheld: Withheld | None = None
-    """The model's turn, when the client was refused it because a call in it was rejected."""
+    """The model's turn, when the client was refused it because a call in it was rejected, or because a sentinel ended the run at the reply or at a call in it."""
 
     proposed: Withheld | None = None
     """The model's turn as it proposed it, when the client was handed it with calls taken out."""
