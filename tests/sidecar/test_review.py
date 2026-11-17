@@ -929,6 +929,89 @@ async def test_a_question_about_a_turn_holds_the_whole_turn() -> None:
     assert question["choices"] == ["approve", "terminate"]
 
 
+_LISTING = {
+    "type": "tool_use",
+    "id": "toolu_1",
+    "name": "bash",
+    "input": {"command": "ls\ncat notes.txt"},
+}
+
+
+@pytest.mark.anyio
+async def test_a_turns_calls_are_shown_as_their_own_questions_show_the_call() -> None:
+    # the same sentinel asks about the turn, and then about its call
+    handler = _at_turns("tool_call")
+    async with _serving(handler) as client:
+        turn = await _paused_question(handler, client, _LISTING)
+        await _answer(client, turn["id"], "approve")
+        await _result(client, until="awaiting_review")
+        (question,) = await _list_pending(client)
+
+    (call,) = turn["turn"]["tool_calls"]
+    # bash has a viewer, which shows the command as code and not as a call
+    assert call["view"]["content"] == "```bash\nls\ncat notes.txt\n```\n"
+    assert call["view"] == question["view"]["call"]
+
+
+@pytest.mark.anyio
+async def test_a_question_about_a_call_has_the_rest_of_its_turn() -> None:
+    handler = _reviewed()
+    async with _serving(handler) as client:
+        question = await _paused_question(
+            handler,
+            client,
+            _THOUGHT,
+            _SAID,
+            weather("Oslo"),
+            weather("Bergen", "toolu_2"),
+        )
+
+    assert (question["stage"], question["call"]["id"]) == ("tool_call", "toolu_1")
+    # The sidecar holds the reply, so the eval has shown the person none of the
+    # turn: the question has its text and its reasoning.
+    assert [block["type"] for block in question["turn"]["content"]] == [
+        "reasoning",
+        "text",
+    ]
+    assert question["message"] == "I'll check two cities."
+    # A question hands over only the call it asks about, so the turn's other
+    # call, which the sentinel may yet reject, is not in it.
+    assert "tool_calls" not in question["turn"]
+    assert "Bergen" not in json.dumps(question)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stage", ["model_output", "tool_call"])
+async def test_a_questions_turn_has_nothing_that_only_a_provider_reads(
+    stage: str,
+) -> None:
+    handler = _at_turns() if stage == "model_output" else _reviewed()
+    withheld = {"type": "redacted_thinking", "data": "gAAAAB-cipher-text"}
+    async with _serving(handler) as client:
+        question = await _paused_question(
+            handler, client, _THOUGHT, withheld, _SAID, weather("Oslo")
+        )
+        assert question["stage"] == stage
+        await _answer(client, question["id"], "approve")
+        await _result(client, until="decided")
+        held = await _judged_reply(client)
+
+    # A person reads the thinking, and can't read its signature or the cipher
+    # text of thinking the provider withheld, so the question has neither.
+    thought, hidden = [
+        block for block in question["turn"]["content"] if block["type"] == "reasoning"
+    ]
+    assert thought["summary"] == "Two lookups, then compare."
+    assert (thought["reasoning"], hidden["reasoning"]) == ("", "")
+    assert hidden["redacted"] is True
+    assert "sig" not in json.dumps(question["turn"])
+    assert "cipher-text" not in json.dumps(question["turn"])
+    # The eval sends the turn back to the provider, which checks both. They are
+    # in the judged reply, which is the turn the eval keeps.
+    assert b'"signature":"sig"' in held.content.replace(b": ", b":")
+    assert b"gAAAAB-cipher-text" in held.content
+
+
 @pytest.mark.anyio
 async def test_an_approved_turn_is_decided_and_its_reply_is_kept_for_the_eval() -> None:
     handler = _at_turns()
@@ -1008,6 +1091,8 @@ async def test_a_question_at_a_tools_result_is_asked_before_the_provider_is_call
         assert question["request_id"] == "irid-2"
         assert question["choices"] == ["approve", "terminate"]
         assert question["result"]["content"] == "Rain."
+        # the eval was given the turn that made the call before it ran the call
+        assert "turn" not in question
         assert (await _result(client, "irid-2"))["state"] == "awaiting_review"
 
 

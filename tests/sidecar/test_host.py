@@ -6,7 +6,7 @@ import pytest
 from inspect_ai.model import ChatMessageUser, GenerateConfig, ModelOutput
 from inspect_ai.tool import ToolCall, ToolCallView
 
-from inspect_sentinel import human, sequential
+from inspect_sentinel import HumanAnswer, human, sequential
 from inspect_sentinel._context import Context
 from inspect_sentinel._decorators import protocol
 from inspect_sentinel._report import Decision, Escalations
@@ -79,20 +79,17 @@ _GENERATE: dict[str, Any] = {
     "config": GenerateConfig(),
 }
 
+_TURN = AfterGenerate(
+    **_GENERATE, output=ModelOutput.from_content("anthropic/claude-test", "Hi.")
+)
+
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     ("step", "about"),
     [
         pytest.param(BeforeGenerate(**_GENERATE), "the model's request", id="request"),
-        pytest.param(
-            AfterGenerate(
-                **_GENERATE,
-                output=ModelOutput.from_content("anthropic/claude-test", "Hi."),
-            ),
-            "the model's turn",
-            id="turn",
-        ),
+        pytest.param(_TURN, "the model's turn", id="turn"),
     ],
 )
 async def test_a_generate_nobody_can_be_asked_about_ends_the_run(
@@ -105,6 +102,33 @@ async def test_a_generate_nobody_can_be_asked_about_ends_the_run(
     # ends the run
     assert answer.decision == "terminate"
     assert about in caplog.text
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asks", ["nobody", "the eval"])
+@pytest.mark.parametrize(
+    "step", [BeforeGenerate(**_GENERATE), _TURN], ids=["request", "turn"]
+)
+async def test_a_generate_cannot_be_offered_for_rejection(
+    step: BeforeGenerate | AfterGenerate, asks: str
+) -> None:
+    asked: list[object] = []
+
+    async def ask(
+        step: object, escalations: Escalations, choices: object
+    ) -> HumanAnswer:
+        asked.append(step)
+        return HumanAnswer(decision="approve")
+
+    host = RunHost(SidecarHost(), None, ask if asks == "the eval" else None)
+
+    # Neither a request nor a turn can be rejected, so the answer could not
+    # become a decision. The protocol is told when it asks, as Inspect's own
+    # host tells it.
+    with pytest.raises(ValueError, match="cannot be offered 'reject'"):
+        await host.ask_human(step, (), ["approve", "reject", "terminate"])
+
+    assert asked == []
 
 
 @pytest.mark.anyio

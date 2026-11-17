@@ -1728,7 +1728,7 @@
             }
           ],
           "default": null,
-          "description": "The model's whole turn, as Inspect writes a `ChatMessageAssistant`: its text, its reasoning and every tool call it makes. Present at `model_output`, unless the reply held no turn. It is for showing to the person. Do not add it to the agent's conversation.",
+          "description": "The model's turn, as Inspect writes a `ChatMessageAssistant`. The eval has been given none of it yet, so it is for showing to the person. Do not add it to the agent's conversation: its reasoning has no signature, and none of the cipher text a provider returns in place of reasoning it withheld. At `model_output` it is the whole turn, unless the reply held none: its text, its reasoning and every tool call it makes, each with the call part of its view. A viewer's separate context is only in the call's own question. At `tool_call` it is the turn that made the call, without its tool calls. Left out at `tool_result`, where the eval already has the turn.",
           "title": "Turn"
         },
         "request": {

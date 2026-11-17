@@ -92,7 +92,14 @@ from ._reply_stream import (
     ReplyStart,
     ReplyStream,
 )
-from ._review import Question, RequestAsked, Review, Reviews, escalated
+from ._review import (
+    Question,
+    RequestAsked,
+    Review,
+    Reviews,
+    escalated,
+    shown_turn,
+)
 from ._sign import TIMESTAMP_WINDOW, call_values, request_values, unproven
 from ._state import (
     MADE_KEPT,
@@ -2372,7 +2379,7 @@ class Handler:
                 decision = await run_sentinel(
                     self._protocol,
                     HostContext(
-                        host=RunHost(self._host, run.eval, self._asker(held)),
+                        host=RunHost(self._host, run.eval, self._asker(held, run)),
                         recorder=held.recorder,
                         store=held.store,
                         proxy=held.proxy,
@@ -2411,7 +2418,7 @@ class Handler:
         )
         return decision
 
-    def _asker(self, held: Held) -> AskHuman | None:
+    def _asker(self, held: Held, run: Run) -> AskHuman | None:
         # A sentinel can ask a person only for a run that an Inspect eval names and
         # whose request passed the check of its header. The eval shows the question in
         # Inspect's approval UI. For any other run there is nobody to ask, and the
@@ -2526,14 +2533,28 @@ class Handler:
                     step.tool_choice,
                 )
             elif isinstance(step, AfterGenerate):
-                # the whole turn, as the model returned it, before any of its
-                # calls is judged
-                turn = step.output.message if step.output.choices else None
+                # The whole turn, as the model returned it, before any of its calls is
+                # judged. Each call has the call part of its view, which is all that
+                # `ToolCall.view` holds, as Inspect's own `generate` sets it. A viewer's
+                # context is shown only in the call's own question.
+                if step.output.choices:
+                    turn = shown_turn(
+                        step.output.message,
+                        [
+                            replace(made, view=self._view(made, run).call)
+                            for made in step.output.message.tool_calls or []
+                        ],
+                    )
                 message = turn.text if turn is not None else ""
             else:
                 call, message, view = step.call, step.message, step.view
                 if isinstance(step, AfterToolCall):
                     result = step.result
+                elif step.assistant_message is not None:
+                    # The eval has none of the reply yet, so the person is shown what
+                    # the turn holds besides its calls. The calls are left out: a
+                    # question hands over only the call it asks about.
+                    turn = shown_turn(step.assistant_message, None)
             question = Question(
                 eval_id=sample.eval_id,
                 sample_uuid=sample.sample_uuid,
