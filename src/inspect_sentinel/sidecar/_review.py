@@ -1,13 +1,13 @@
 """Questions that a sentinel in the sidecar asks a person, held until an Inspect eval answers them.
 
-A sentinel asks a person with `human()`, which calls `Host.ask_human`. For a run that an Inspect eval names, the sidecar holds the question here while the step waits. A question is about one tool call, before it runs or after, or about a model's whole turn before any of its calls runs. The eval lists the question with `list_pending_questions`, shows it in Inspect's approval UI, and sends the person's answer with `answer_question`.
+A sentinel asks a person with `human()`, which calls `Host.ask_human`. For a run that an Inspect eval names, the sidecar holds the question here while the step waits. A question is about one tool call, before it runs or after, about a model's whole turn before any of its calls runs, or about the request a model is about to be sent. The eval lists the question with `list_pending_questions`, shows it in Inspect's approval UI, and sends the person's answer with `answer_question`.
 
 A person may take days to answer, so no connection waits on a question. The handler answers the model call with a "pending review" error and keeps the judging that asked the question. That judging continues when the answer arrives (`design/sidecar.md`, "A review pauses the model call, not a connection"). A question has no expiry unless the operator sets one.
 
 This first way of asking has two temporary exceptions to the sidecar's rules, both in `design/sidecar-plan.md`, step 13:
 
 - The eval signs the answer with its own key, the token it signs every call with. The sidecar accepts an answer only for a question from one of that eval's own runs. Later, reviewers are to answer with credentials of their own, which the sidecar checks.
-- The question gives the eval's process the call's arguments, or the whole turn, even if the person then rejects the call or ends the run. Later, a reviewer surface outside the eval's process is to show the arguments instead.
+- The question gives the eval's process the call's arguments, the whole turn, or the messages of the request that were not sent before, even if the person then rejects the call or ends the run. Later, a reviewer surface outside the eval's process is to show the arguments instead.
 
 A question belongs to one model call. A `Review` records what happened to the question. The handler keeps the `Review` with the try of the call that asked, whether or not the step reached a decision.
 """
@@ -24,8 +24,8 @@ from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
 
 import anyio
-from inspect_ai.model import ChatMessageAssistant, ChatMessageTool
-from inspect_ai.tool import ToolCall, ToolCallView
+from inspect_ai.model import ChatMessage, ChatMessageAssistant, ChatMessageTool
+from inspect_ai.tool import ToolCall, ToolCallView, ToolChoice
 
 from .._host import HumanAnswer
 from .._report import Escalations
@@ -79,7 +79,7 @@ class Escalated:
 class Review:
     """The record of one question: when it was asked, what the eval answered, and how the wait ended. The handler keeps it with the HTTP try that asked.
 
-    It holds the call's id, and none of the call's arguments, view or result, nor any of a turn. The answer is recorded when the sidecar accepts it, separately from how the wait ended. So a try that is stopped just after its answer was accepted keeps the answer on its record, though the answer had no effect.
+    It holds the call's id, and none of the call's arguments, view or result, nor any of a turn or a request. The answer is recorded when the sidecar accepts it, separately from how the wait ended. So a try that is stopped just after its answer was accepted keeps the answer on its record, though the answer had no effect.
     """
 
     id: str
@@ -89,7 +89,7 @@ class Review:
     """The stage at which the step was judged."""
 
     call: str | None
-    """The id of the call the question was about. None for a question about a model's whole turn, at `model_output`."""
+    """The id of the call the question was about. None for a question at a generate stage, which is about a whole turn or a request."""
 
     asked: float
     """When it was asked, in seconds since the epoch."""
@@ -127,6 +127,26 @@ class Review:
                 self.cause = "stopped"
 
 
+@dataclass(frozen=True)
+class RequestAsked:
+    """What a question before a generate shows of the request the model is about to be sent."""
+
+    model: str
+    """The model the request is for."""
+
+    messages: int
+    """How many messages the request sends."""
+
+    new: tuple[tuple[int, ChatMessage], ...]
+    """The messages the model has not been sent before, each with its position in the request, counting from 1. A message that was rewritten since it was sent is among them."""
+
+    tools: tuple[str, ...]
+    """The names of the tools the request offers the model."""
+
+    tool_choice: ToolChoice
+    """Which tool the model is to call: `auto`, `any` or `none`, or the one function it must call. A function is kept apart from the three words, since a tool can be named one of them."""
+
+
 @dataclass
 class Question:
     """A question that a sentinel asked a person, for a run that an Inspect eval names. The sidecar holds it only while the step waits."""
@@ -141,22 +161,25 @@ class Question:
     """The `x-irid` of the model request in which the step was found. The eval assigns it."""
 
     stage: Stage
-    """The stage at which the step was judged: `tool_call`, `tool_result` or `model_output`."""
+    """The stage at which the step was judged."""
 
     call: ToolCall | None
-    """The call the person decides about, as it will run. None at `model_output`, where the question is about the whole turn."""
+    """The call the person decides about, as it will run. None at a generate stage, where the question is about a whole turn or a request."""
 
     message: str
-    """The assistant's text: alongside the call, or the turn's own at `model_output`."""
+    """The assistant's text: alongside the call, or the turn's own at `model_output`. Empty at `model_input`."""
 
     view: ToolCallView | None
-    """How the call is shown to the person. None at `model_output`."""
+    """How the call is shown to the person. None at a generate stage."""
 
     result: ChatMessageTool | None
     """The call's result, when the stage is `tool_result`."""
 
     turn: ChatMessageAssistant | None
-    """The model's turn that the person decides about, at `model_output`: its text, its reasoning and every tool call it makes, before any of them runs. None at the tool stages, and for a reply that holds no turn."""
+    """The model's turn that the person decides about, at `model_output`: its text, its reasoning and every tool call it makes, before any of them runs. None at every other stage, and for a reply that holds no turn."""
+
+    request: RequestAsked | None
+    """The request that the person decides about, at `model_input`, before it is sent to the provider. None at every other stage."""
 
     escalations: tuple[Escalated, ...]
     """The escalations that were passed to the protocol that asked, in order."""
@@ -193,9 +216,9 @@ class Question:
     @property
     def about(self) -> str:
         """What the question is about, in words for a log line."""
-        if self.call is None:
-            return "the model's turn"
-        return f"the call to {self.call.function}"
+        if self.call is not None:
+            return f"the call to {self.call.function}"
+        return "the model's request" if self.request is not None else "the model's turn"
 
 
 @dataclass(frozen=True)

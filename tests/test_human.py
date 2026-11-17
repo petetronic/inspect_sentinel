@@ -18,7 +18,13 @@ from inspect_sentinel._report import (
     Observation,
 )
 from inspect_sentinel._runner import run_sentinel
-from inspect_sentinel._step import AfterGenerate, AfterToolCall, BeforeToolCall, Step
+from inspect_sentinel._step import (
+    AfterGenerate,
+    AfterToolCall,
+    BeforeGenerate,
+    BeforeToolCall,
+    Step,
+)
 from inspect_sentinel._types import Monitor, Protocol, ProtocolGroup
 from inspect_sentinel.config import sentinel_config, sentinel_from_config
 from tests._fakes import (
@@ -26,6 +32,7 @@ from tests._fakes import (
     ListRecorder,
     after_generate_step,
     after_step,
+    before_generate_step,
     before_step,
     host_context,
 )
@@ -79,21 +86,25 @@ async def _root(
 
 @pytest.mark.parametrize(
     "stages",
-    [[], ["model_input"], ["tool_call", "bogus"], "tool_call"],
+    [[], ["tool_call", "bogus"], "tool_call"],
 )
 def test_stages_must_name_supported_stages(stages: Sequence[str]) -> None:
-    with pytest.raises(ValueError, match="'tool_call'.*'tool_result'.*'model_output'"):
+    with pytest.raises(
+        ValueError, match="'tool_call'.*'tool_result'.*'model_input'.*'model_output'"
+    ):
         human(stages=stages)
 
 
 def test_one_function_per_chosen_stage() -> None:
     before = human(stages=["tool_call"])
     after = human(stages=["tool_result"])
+    request = human(stages=["model_input"])
     turn = human(stages=["model_output"])
     both = human(stages=["tool_call", "tool_result"])
     assert not isinstance(before, ProtocolGroup)
     assert step_types(before) == {BeforeToolCall}
     assert step_types(after) == {AfterToolCall}
+    assert step_types(request) == {BeforeGenerate}
     assert step_types(turn) == {AfterGenerate}
     assert isinstance(both, ProtocolGroup)
     assert step_types(both) == {BeforeToolCall, AfterToolCall}
@@ -104,6 +115,7 @@ def test_one_function_per_chosen_stage() -> None:
     [
         ("tool_call", before_step(), ("approve", "reject", "terminate")),
         ("tool_result", after_step(), ("approve", "terminate")),
+        ("model_input", before_generate_step(), ("approve", "terminate")),
         ("model_output", after_generate_step(), ("approve", "terminate")),
     ],
 )
@@ -134,6 +146,7 @@ async def test_custom_choices_are_offered() -> None:
         (["tool_call", "tool_result"], ["approve", "modify"], "'modify'"),
         (["model_output"], ["approve", "reject"], "'reject'.*after a generate"),
         (["model_output"], ["modify"], "'modify'.*after a generate"),
+        (["model_input"], ["approve", "reject"], "'reject'.*before a generate"),
         (["tool_call", "model_output"], ["approve", "reject"], "after a generate"),
     ],
 )

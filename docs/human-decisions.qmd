@@ -1,7 +1,7 @@
 ---
 title: "Human Decisions"
 description: "Asking a person to decide about a step with human(), and handling escalations with handle_escalation()."
-llms-description: "human() and its stages (tool_call, tool_result, model_output) and choices, escalating to a person in a sequential(), whole-turn review, what the person sees, a person beside other protocols in concurrent(), step.human_decisions, handle_escalation(), and unhandled escalations."
+llms-description: "human() and its stages (tool_call, tool_result, model_input, model_output) and choices, escalating to a person in a sequential(), whole-turn review, reviewing a model request, what the person sees, a person beside other protocols in concurrent(), step.human_decisions, handle_escalation(), and unhandled escalations."
 ---
 
 ## Overview
@@ -18,6 +18,7 @@ Usually you don't want a person asked about every step. A rule or a monitor sett
 |-------------------|-------------------|--------------------------------------|
 | `"tool_call"` | `BeforeToolCall` | A tool call, before it runs. |
 | `"tool_result"` | `AfterToolCall` | A tool call's result, before the agent's model receives it. |
+| `"model_input"` | `BeforeGenerate` | A request to the agent's model, before it is sent (see [Model Requests](#model-requests)). |
 | `"model_output"` | `AfterGenerate` | A whole assistant turn, before the agent acts on it (see [Whole Turns](#whole-turns)). |
 
 `stages` is required, and you can give several. On its own, `human(stages=["tool_call"])` asks about every tool call, like Inspect's human approver.
@@ -102,9 +103,10 @@ When the agent tries to delete files, the eval pauses and asks you to approve, r
 |-------------------|---------------------------------------------|
 | `"tool_call"` | `approve`, `reject`, `terminate` |
 | `"tool_result"` | `approve`, `terminate` |
+| `"model_input"` | `approve`, `terminate` |
 | `"model_output"` | `approve`, `terminate` |
 
-`reject` is offered only before a tool call (see [Actions](protocols.qmd#actions)), and rejecting a whole turn is not supported. Offering a choice a stage doesn't allow raises an error when `human()` is created. `"modify"` is accepted before a tool call, but Inspect's approval surfaces cannot edit a tool call, so offering it raises an error when the person is asked.
+`reject` is offered only before a tool call (see [Actions](protocols.qmd#actions)), and rejecting a request or a whole turn is not supported. Offering a choice a stage doesn't allow raises an error when `human()` is created. `"modify"` is accepted before a tool call, but Inspect's approval surfaces cannot edit a tool call, so offering it raises an error when the person is asked.
 
 The answer maps to a decision: `approve` to `proceed`, `reject` to `reject`, and `terminate` to `terminate`. The reason recorded with the answer becomes the decision's explanation, and on a reject it is also the message the agent receives. The person doesn't enter a reason: the approval panel and console record a fixed text, such as "Human operator rejected the tool call.", and an ACP client (an editor or tool that speaks the [Agent Client Protocol](https://inspect.aisi.org.uk/intervention.html)) records none, so the agent is told "Tool call not approved."
 
@@ -124,9 +126,23 @@ Its `turn_triage()` rule runs at `AfterGenerate`. It reads the tool calls from `
 inspect eval examples/escalate_turn_to_human.py --model openai/gpt-5-mini
 ```
 
+## Model Requests
+
+At `"model_input"`, the person decides about a request before the agent's model is sent it. Use it when what reaches the model matters, such as a tool's output or a document the agent read. Approve sends the request unchanged, and terminate ends the sample without sending it.
+
+The person is shown how many messages the request sends, the tools it offers and which the model must call, and each message the model has not been sent before. That includes a message the scaffold rewrote since it was sent, and an assistant message the scaffold wrote itself, wherever they are in the request.
+
+The prompt has limits. A message the model was sent before is not shown again, even if it has moved or is sent a second time, and neither is the fact that one was removed. Images and other content that is not text are counted, not shown. Tools are shown by name, without their descriptions or parameters. The console and the approval panel show no other part of the conversation, so read the request in the eval's log if the decision depends on those.
+
+``` python
+Task(..., sentinel=sequential([request_triage(), human(stages=["model_input"])]))
+```
+
+Here `request_triage()` stands for a rule of your own at `BeforeGenerate`: it reads the request from `step.input` and escalates the ones a person should see. On its own, `human(stages=["model_input"])` asks before every request.
+
 ## What the Person Sees
 
-The person is asked through Inspect's human approval surfaces: an attached ACP client, the approval panel in the full-screen display, or the console otherwise (for example, with `--display plain`). The prompt shows the tool call, the escalations that led to it, and, after a tool call, its result. At `"model_output"` it shows the turn's text, the escalations, and each tool call as a numbered code block.
+The person is asked through Inspect's human approval surfaces: an attached ACP client, the approval panel in the full-screen display, or the console otherwise (for example, with `--display plain`). The prompt shows the tool call, the escalations that led to it, and, after a tool call, its result. At `"model_output"` it shows the turn's text, the escalations, and each tool call as a numbered code block. At `"model_input"` it shows the escalations, the tools offered, and each message not sent before as a numbered code block.
 
 Characters that change how text displays, such as terminal escape sequences and zero-width characters, appear in the prompt as a marker of their code point, such as `‹U+001B›`.
 

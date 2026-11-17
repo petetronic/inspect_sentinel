@@ -50,9 +50,8 @@ from ._exchange import (
     Request,
     succeeded,
 )
-from ._history import record_sent, with_sent_ids
+from ._history import not_sent_before, record_sent, with_sent_ids
 from ._host import (
-    Askable,
     AskHuman,
     ModelUsed,
     Record,
@@ -93,7 +92,7 @@ from ._reply_stream import (
     ReplyStart,
     ReplyStream,
 )
-from ._review import Question, Review, Reviews, escalated
+from ._review import Question, RequestAsked, Review, Reviews, escalated
 from ._sign import TIMESTAMP_WINDOW, call_values, request_values, unproven
 from ._state import (
     MADE_KEPT,
@@ -2431,7 +2430,7 @@ class Handler:
             return None
 
         async def ask(
-            step: Askable,
+            step: Step,
             escalations: Escalations,
             choices: Sequence[str],
         ) -> HumanAnswer:
@@ -2514,7 +2513,19 @@ class Handler:
             view: ToolCallView | None = None
             result: ChatMessageTool | None = None
             turn: ChatMessageAssistant | None = None
-            if isinstance(step, AfterGenerate):
+            sent: RequestAsked | None = None
+            message = ""
+            if isinstance(step, BeforeGenerate):
+                # The request the model is about to be sent: the messages it
+                # has not been sent before, and the tools it is offered.
+                sent = RequestAsked(
+                    step.model,
+                    len(step.input),
+                    tuple(not_sent_before(step.input, step.history)),
+                    tuple(tool.name for tool in step.tools),
+                    step.tool_choice,
+                )
+            elif isinstance(step, AfterGenerate):
                 # the whole turn, as the model returned it, before any of its
                 # calls is judged
                 turn = step.output.message if step.output.choices else None
@@ -2533,6 +2544,7 @@ class Handler:
                 view=view,
                 result=result,
                 turn=turn,
+                request=sent,
                 escalations=escalated(escalations),
                 choices=tuple(choices),
                 closes=asked + timeout if timeout is not None else None,

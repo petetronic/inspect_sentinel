@@ -1619,8 +1619,30 @@
       "title": "ListPendingQuestionsResult",
       "type": "object"
     },
+    "MessageShown": {
+      "description": "One message of a request that the model has not been sent before.",
+      "properties": {
+        "position": {
+          "description": "Where the message is in the request, counting from 1.",
+          "title": "Position",
+          "type": "integer"
+        },
+        "message": {
+          "additionalProperties": true,
+          "description": "The message, as Inspect writes a `ChatMessage`. It is for showing to the person. Do not add it to the agent's conversation.",
+          "title": "Message",
+          "type": "object"
+        }
+      },
+      "required": [
+        "position",
+        "message"
+      ],
+      "title": "MessageShown",
+      "type": "object"
+    },
     "QuestionAsked": {
-      "description": "A question that a sentinel asked a person about one of the eval's model requests: about a tool call, or about the model's whole turn. The step waits for the answer.",
+      "description": "A question that a sentinel asked a person about one of the eval's model requests: about a tool call, about the model's whole turn, or about the request itself. The step waits for the answer.",
       "properties": {
         "id": {
           "description": "The question's id. `answer_question` takes it.",
@@ -1638,10 +1660,11 @@
           "type": "string"
         },
         "stage": {
-          "description": "`tool_call`: the call has not run yet. `tool_result`: the call has run, and its result is about to reach the model. `model_output`: the model's turn is complete, and none of its calls has run.",
+          "description": "`tool_call`: the call has not run yet. `tool_result`: the call has run, and its result is about to reach the model. `model_input`: the request has not been sent to the provider. `model_output`: the model's turn is complete, and none of its calls has run.",
           "enum": [
             "tool_call",
             "tool_result",
+            "model_input",
             "model_output"
           ],
           "title": "Stage",
@@ -1658,11 +1681,11 @@
             }
           ],
           "default": null,
-          "description": "The tool call with its arguments, as Inspect writes a `ToolCall`. It is for showing to the person. Do not add it to the agent's conversation. Left out at `model_output`.",
+          "description": "The tool call with its arguments, as Inspect writes a `ToolCall`. It is for showing to the person. Do not add it to the agent's conversation. Left out at a generate stage.",
           "title": "Call"
         },
         "message": {
-          "description": "The assistant's text: what came with the call, or at `model_output` the turn's own text.",
+          "description": "The assistant's text: what came with the call, or at `model_output` the turn's own text. Empty at `model_input`.",
           "title": "Message",
           "type": "string"
         },
@@ -1677,7 +1700,7 @@
             }
           ],
           "default": null,
-          "description": "How to display the call, as Inspect writes a `ToolCallView`. Left out at `model_output`.",
+          "description": "How to display the call, as Inspect writes a `ToolCallView`. Left out at a generate stage.",
           "title": "View"
         },
         "result": {
@@ -1707,6 +1730,18 @@
           "default": null,
           "description": "The model's whole turn, as Inspect writes a `ChatMessageAssistant`: its text, its reasoning and every tool call it makes. Present at `model_output`, unless the reply held no turn. It is for showing to the person. Do not add it to the agent's conversation.",
           "title": "Turn"
+        },
+        "request": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RequestShown"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The request the model is about to be sent. Present at `model_input`."
         },
         "escalations": {
           "description": "The escalations passed to the protocol that asked the person, in order: who escalated, and why.",
@@ -2193,6 +2228,70 @@
       "title": "RequestResultResult",
       "type": "object"
     },
+    "RequestShown": {
+      "description": "What a question at `model_input` shows of the request the model is about to be sent.",
+      "properties": {
+        "model": {
+          "description": "The model the request is for.",
+          "title": "Model",
+          "type": "string"
+        },
+        "messages": {
+          "description": "How many messages the request sends.",
+          "title": "Messages",
+          "type": "integer"
+        },
+        "new": {
+          "description": "The messages the model has not been sent before, in the request's order. A message that was rewritten since it was sent is among them, as is an assistant message the client wrote itself. A message sent before is left out wherever it now sits.",
+          "items": {
+            "$ref": "#/$defs/MessageShown"
+          },
+          "title": "New",
+          "type": "array"
+        },
+        "tools": {
+          "description": "The names of the tools the request offers the model.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Tools",
+          "type": "array"
+        },
+        "tool_choice": {
+          "description": "Which tool the model is to call. `auto`: any of them, or none. `any`: one of them. `none`: none of them. `function`: the one that `tool_function` names.",
+          "enum": [
+            "auto",
+            "any",
+            "none",
+            "function"
+          ],
+          "title": "Tool Choice",
+          "type": "string"
+        },
+        "tool_function": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The name of the function the model must call. Present where `tool_choice` is `function`. It is kept apart from `tool_choice`, since a tool can be named `auto`, `any` or `none`.",
+          "title": "Tool Function"
+        }
+      },
+      "required": [
+        "model",
+        "messages",
+        "new",
+        "tools",
+        "tool_choice"
+      ],
+      "title": "RequestShown",
+      "type": "object"
+    },
     "ReviewRecord": {
       "description": "The record of one question that a sentinel asked a person while it judged the request or its reply.",
       "properties": {
@@ -2207,10 +2306,11 @@
           "type": "integer"
         },
         "stage": {
-          "description": "The stage at which the sentinel asked: `tool_call` before the call runs, `tool_result` after it has run, `model_output` about the model's whole turn, before any of its calls runs.",
+          "description": "The stage at which the sentinel asked: `tool_call` before the call runs, `tool_result` after it has run, `model_input` about the request before the model is sent it, `model_output` about the model's whole turn, before any of its calls runs.",
           "enum": [
             "tool_call",
             "tool_result",
+            "model_input",
             "model_output"
           ],
           "title": "Stage",
@@ -2226,7 +2326,7 @@
             }
           ],
           "default": null,
-          "description": "The id of the tool call the question was about. Left out at `model_output`, where the question was about the whole turn.",
+          "description": "The id of the tool call the question was about. Left out at a generate stage, where the question was about a request or a whole turn.",
           "title": "Call"
         },
         "asked": {

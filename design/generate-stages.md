@@ -176,7 +176,7 @@ Without decision 7, a sentinel of tool-stage monitors under `concurrent` or `obs
 
 ## f. Events and the viewer {#f-events-and-the-viewer}
 
-`SentinelEvent.stage` already declares `model_input` and `model_output` next to `tool_call` and `tool_result`; the dispatcher emits them, so no event schema or generated type changes. The stage names are the ones `human(stages=)` takes; it supports `model_output`.
+`SentinelEvent.stage` already declares `model_input` and `model_output` next to `tool_call` and `tool_result`; the dispatcher emits them, so no event schema or generated type changes. The stage names are the ones `human(stages=)` takes; it supports both.
 
 `step_id` follows sentinel-development.md, "Step ids" (inspect_ai #5990):
 
@@ -197,4 +197,4 @@ Built:
 - `threshold` and `handle_escalation` at the generate stages.
 - In inspect_ai: `Model._prepare_input`, the two hooks in `Model.generate`, decision 1's agent-loop rule, the per-stage events and step ids, and the skip for unwatched stages.
 
-Built since: `human(stages=["model_output"])` (AISI R1), offering `approve` and `terminate`; inspect_ai shows the person the whole turn as one view. Not built: `reject` and `modify` at the generate stages and `Decision.modify` (part 2, decisions 8–13), `human()` at `BeforeGenerate`, and tool-stage sentinels for bridged agents (inspect_ai #5765), and replay of `history`, the as-sent view of an agent instance's run (AISI R10, built live).
+Built since: `human(stages=["model_output"])` (AISI R1), offering `approve` and `terminate`; inspect_ai shows the person the whole turn as one view. Also built since: `human(stages=["model_input"])`, offering `approve` and `terminate`; inspect_ai shows the person the request as one view, with the tools it offers and the messages the model has not been sent before. Not built: `reject` and `modify` at the generate stages and `Decision.modify` (part 2, decisions 8–13), and tool-stage sentinels for bridged agents (inspect_ai #5765), and replay of `history`, the as-sent view of an agent instance's run (AISI R10, built live).

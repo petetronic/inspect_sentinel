@@ -210,3 +210,31 @@ def _without_made_up_id(item: object, carried: frozenset[str]) -> object:
 
 def _carried(id: object, carried: frozenset[str]) -> bool:
     return isinstance(id, str) and id in carried
+
+
+def not_sent_before(
+    input: Sequence[ChatMessage], history: Sequence[ChatMessage] | None
+) -> list[tuple[int, ChatMessage]]:
+    """The messages of a request that the model has not been sent before, each with its position in the request, counting from 1.
+
+    A message was sent before if `history` holds one that says the same: what the model is sent of it, so all but its id, source, metadata and model. So a message that was rewritten since it was sent is here as its new version, as is an assistant message the client wrote itself, at the end of a request or elsewhere. A message sent before is left out wherever it now sits: one that moved, or that is sent a second time, is not here.
+
+    Args:
+        input: The messages the request sends the model.
+        history: What the conversation has sent the model before this request, as `step.history` holds it. With None, where that isn't known, every message is returned.
+    """
+    if history is None:
+        return list(enumerate(input, 1))
+    sent = {_sent_key(message) for message in history}
+    return [
+        (position, message)
+        for position, message in enumerate(input, 1)
+        if _sent_key(message) not in sent
+    ]
+
+
+def _sent_key(message: ChatMessage) -> str:
+    said = message.model_dump(mode="json", exclude=set(_NOT_SENT))
+    return hashlib.sha256(
+        json.dumps(said, sort_keys=True, default=str).encode()
+    ).hexdigest()

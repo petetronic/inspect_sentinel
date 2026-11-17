@@ -24,10 +24,10 @@ class HumanDecision:
     """
 
     stage: Literal["model_input", "model_output", "tool_call", "tool_result"]
-    """The stage of the step it was made at, as `SentinelEvent.stage` records it: `tool_call`, `tool_result` or `model_output`, the stages `human()` asks at."""
+    """The stage of the step it was made at, as `SentinelEvent.stage` records it: one of the four stages, at each of which `human()` can ask."""
 
     step_id: str
-    """The id of the step it was made at, as `SentinelEvent.step_id` records it: the tool call id at a tool stage, the generate's id (the `uuid` of its first `ModelEvent`) at `model_output`."""
+    """The id of the step it was made at, as `SentinelEvent.step_id` records it: the tool call id at a tool stage, the generate's id (the `uuid` of its first `ModelEvent`) at a generate stage."""
 
     call_ids: tuple[str, ...]
     """The tool calls the decision covered: the step's call at a tool stage, and every call the turn makes at `model_output`. How a prompt says which calls a person approved. Empty for a review of a turn with no tool calls, which has no key to annotate a message by: `step_id` is then the generate's id, which no message in the conversation carries."""
